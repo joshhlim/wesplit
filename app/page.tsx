@@ -87,7 +87,7 @@ export default function Home() {
 
       {step === 0 && <ScanStep busy={busy} err={err} onFile={scan} onManual={() => { up((b) => ({ ...b, items: [{ id: uid(), name: 'Item', qty: 1, price: 0 }] })); setStep(2); }} />}
       {step === 1 && <PeopleStep bill={bill} up={up} next={() => setStep(2)} />}
-      {step === 2 && <AssignStep bill={bill} up={up} next={() => setStep(3)} detected={detected} total={result.total} unassigned={result.shares._} />}
+      {step === 2 && <AssignStep bill={bill} up={up} next={() => setStep(3)} detected={detected} total={result.total} unassigned={result.shares._} shares={result.shares} />}
       {step === 3 && <SettleStep bill={bill} up={up} shares={result.shares} total={result.total} mobile={mobile} setMobile={setMobile} />}
       <footer>Everything stays on this device.</footer>
     </main>
@@ -144,74 +144,147 @@ function PeopleStep({ bill, up, next }: { bill: Bill; up: (f: (b: Bill) => Bill)
   );
 }
 
-function AssignStep({ bill, up, next, detected, total, unassigned }: { bill: Bill; up: (f: (b: Bill) => Bill) => void; next: () => void; detected: string | null; total: number; unassigned: number }) {
-  const [drag, setDrag] = useState<{ id: string; x: number; y: number; name: string } | null>(null);
-  const [hover, setHover] = useState<string | null>(null);
-  const [open, setOpen] = useState<string | null>(null);
+type Pt = { x: number; y: number };
+type Geo = { w: number; h: number; items: Record<string, Pt>; people: Record<string, Pt> };
+const buzz = (ms = 10) => { try { navigator.vibrate?.(ms); } catch {} };
+const curve = (a: Pt, b: Pt) => { const dx = Math.max(24, (b.x - a.x) / 2); return `M${a.x},${a.y} C${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`; };
 
-  const give = (itemId: string, pid: string) => up((b) => {
-    const a = (b.assign[itemId] ||= {});
-    if (pid === '*') { b.people.forEach((p) => (a[p.id] = 1)); } else a[pid] = a[pid] ? 0 : 1;
+function AssignStep({ bill, up, next, detected, total, unassigned, shares }: { bill: Bill; up: (f: (b: Bill) => Bill) => void; next: () => void; detected: string | null; total: number; unassigned: number; shares: Record<string, number> }) {
+  const cont = useRef<HTMLDivElement>(null);
+  const itemEls = useRef(new Map<string, HTMLElement>());
+  const personEls = useRef(new Map<string, HTMLElement>());
+  const [geo, setGeo] = useState<Geo>({ w: 0, h: 0, items: {}, people: {} });
+  const [sel, setSel] = useState<string | null>(null);
+  const [sheet, setSheet] = useState<{ id: string; pid?: string } | null>(null);
+  const [drag, setDrag] = useState<{ id: string; x: number; y: number; hover: string | null } | null>(null);
+  const dr = useRef<{ id: string; sx: number; sy: number; active: boolean; wait: boolean; timer?: number; moved: boolean } | null>(null);
+  const raf = useRef(0);
+
+  const measure = () => {
+    cancelAnimationFrame(raf.current);
+    raf.current = requestAnimationFrame(() => {
+      const c = cont.current; if (!c) return;
+      const r = c.getBoundingClientRect();
+      const g: Geo = { w: r.width, h: r.height, items: {}, people: {} };
+      itemEls.current.forEach((el, id) => { const b = el.getBoundingClientRect(); g.items[id] = { x: b.right - r.left, y: b.top + b.height / 2 - r.top }; });
+      personEls.current.forEach((el, id) => { const b = el.querySelector('.av')!.getBoundingClientRect(); g.people[id] = { x: b.left - r.left, y: b.top + b.height / 2 - r.top }; });
+      setGeo((old) => (JSON.stringify(old) === JSON.stringify(g) ? old : g));
+    });
+  };
+  useEffect(measure);
+  useEffect(() => {
+    const ro = new ResizeObserver(measure);
+    if (cont.current) ro.observe(cont.current);
+    window.addEventListener('scroll', measure, true); window.addEventListener('resize', measure);
+    return () => { ro.disconnect(); window.removeEventListener('scroll', measure, true); window.removeEventListener('resize', measure); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const personAt = (x: number, y: number) => {
+    let hit: string | null = null;
+    personEls.current.forEach((el, id) => { const b = el.getBoundingClientRect(); if (x >= b.left - 10 && x <= b.right + 10 && y >= b.top - 8 && y <= b.bottom + 8) hit = id; });
+    return hit;
+  };
+  const link = (id: string, pid: string, toggle = false) => up((b) => {
+    const a = (b.assign[id] ||= {});
+    if (pid === '*') b.people.forEach((p) => (a[p.id] = a[p.id] || 1));
+    else if (toggle && a[pid]) a[pid] = 0;
+    else a[pid] = a[pid] || 1;
+    buzz(toggle && !a[pid] ? 6 : 12);
     return b;
   });
-  const target = (x: number, y: number) => (document.elementFromPoint(x, y) as HTMLElement | null)?.closest('[data-pid]')?.getAttribute('data-pid') || null;
 
   useEffect(() => {
-    if (!drag) return;
-    const move = (e: PointerEvent) => { setDrag((d) => d && { ...d, x: e.clientX, y: e.clientY }); setHover(target(e.clientX, e.clientY)); };
-    const end = (e: PointerEvent) => { const t = target(e.clientX, e.clientY); if (t) give(drag.id, t); setDrag(null); setHover(null); };
-    window.addEventListener('pointermove', move); window.addEventListener('pointerup', end); window.addEventListener('pointercancel', end);
-    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); window.removeEventListener('pointercancel', end); };
+    const local = (e: PointerEvent) => { const r = cont.current!.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+    const move = (e: PointerEvent) => {
+      const d = dr.current; if (!d) return;
+      const dist = Math.hypot(e.clientX - d.sx, e.clientY - d.sy);
+      if (dist > 6) d.moved = true;
+      if (!d.active) {
+        if (d.wait) { if (dist > 8) { clearTimeout(d.timer); dr.current = null; } return; }
+        if (dist > 5) { d.active = true; buzz(8); } else return;
+      }
+      e.preventDefault();
+      setDrag({ id: d.id, ...local(e), hover: personAt(e.clientX, e.clientY) });
+    };
+    const end = (e: PointerEvent) => {
+      const d = dr.current; if (!d) return;
+      clearTimeout(d.timer); dr.current = null;
+      if (d.active) { const pid = personAt(e.clientX, e.clientY); if (pid) link(d.id, pid); setDrag(null); }
+      else if (!d.moved && e.type === 'pointerup') setSel((s) => (s === d.id ? null : d.id));
+    };
+    const cancel = () => { const d = dr.current; if (d) clearTimeout(d.timer); if (!d?.active) { dr.current = null; setDrag(null); } };
+    const tm = (e: TouchEvent) => { if (dr.current?.active || dr.current?.wait) { if (dr.current.active) e.preventDefault(); } };
+    window.addEventListener('pointermove', move, { passive: false }); window.addEventListener('pointerup', end); window.addEventListener('pointercancel', cancel);
+    document.addEventListener('touchmove', tm, { passive: false });
+    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); window.removeEventListener('pointercancel', cancel); document.removeEventListener('touchmove', tm); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drag?.id]);
+  }, []);
 
+  const down = (e: React.PointerEvent, id: string, handle: boolean) => {
+    if ((e.target as HTMLElement).closest('button:not(.dot)')) return;
+    const touchBody = e.pointerType !== 'mouse' && !handle;
+    const d = { id, sx: e.clientX, sy: e.clientY, active: false, wait: touchBody, moved: false, timer: undefined as number | undefined };
+    if (handle) { e.preventDefault(); d.active = true; buzz(8); const r = cont.current!.getBoundingClientRect(); setDrag({ id, x: e.clientX - r.left, y: e.clientY - r.top, hover: null }); }
+    if (touchBody) d.timer = window.setTimeout(() => { if (dr.current === d && !d.moved) { d.active = true; d.wait = false; buzz(15); const r = cont.current!.getBoundingClientRect(); setDrag({ id, x: d.sx - r.left, y: d.sy - r.top, hover: null }); } }, 260);
+    dr.current = d;
+  };
+  const tapPerson = (pid: string) => { if (sel) link(sel, pid, pid !== '*'); };
+
+  const done = bill.items.filter((it) => Object.values(bill.assign[it.id] || {}).some((w) => w > 0)).length;
   const sum = itemsSum(bill.items);
+  const pc = (pid: string) => (pid === '*' ? 'var(--mut)' : bill.people.find((p) => p.id === pid)?.color || '#999');
+  const sheetItem = sheet && bill.items.find((i) => i.id === sheet.id);
+
   return (
     <section>
-      <div className="drop">
-        {bill.people.map((p) => (
-          <div key={p.id} data-pid={p.id} className={'target' + (hover === p.id ? ' hot' : '')}><Avatar p={p} /><small>{p.name}</small></div>
-        ))}
-        <div data-pid="*" className={'target' + (hover === '*' ? ' hot' : '')}><span className="av all">ALL</span><small>Everyone</small></div>
+      <div className="progress"><div style={{ width: `${bill.items.length ? (done / bill.items.length) * 100 : 0}%` }} /></div>
+      <p className="muted hint">{done === bill.items.length ? '✓ All items assigned' : `${done} of ${bill.items.length} assigned · drag an item to a person, or tap item then person`}</p>
+      <div className="map" ref={cont}>
+        <svg className="lines" width={geo.w} height={geo.h}>
+          {bill.items.flatMap((it) => {
+            const a = geo.items[it.id]; if (!a) return [];
+            return Object.entries(bill.assign[it.id] || {}).filter(([, w]) => w > 0).map(([pid, w]) => {
+              const b = geo.people[pid]; if (!b) return null;
+              const d = curve(a, b), dim = sel && sel !== it.id;
+              return (
+                <g key={it.id + pid} className={dim ? 'dim' : ''}>
+                  <path d={d} pathLength={1} className="ln" stroke={pc(pid)} strokeWidth={w > 1 ? 4 : 2.5} />
+                  {w > 1 && <text x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 4} className="wt" fill={pc(pid)}>×{w}</text>}
+                  <path d={d} className="hit" onClick={() => { buzz(6); setSheet({ id: it.id, pid }); }} />
+                </g>
+              );
+            });
+          })}
+          {drag && geo.items[drag.id] && <path d={curve(geo.items[drag.id], drag.hover && geo.people[drag.hover] ? geo.people[drag.hover] : drag)} className="ln live" stroke={drag.hover ? pc(drag.hover) : 'var(--acc)'} strokeWidth={3} />}
+        </svg>
+        <ul className="nodes">
+          {bill.items.map((it) => {
+            const on = Object.values(bill.assign[it.id] || {}).some((w) => w > 0);
+            return (
+              <li key={it.id} ref={(el) => { if (el) itemEls.current.set(it.id, el); else itemEls.current.delete(it.id); }}
+                className={'node' + (on ? '' : ' todo') + (sel === it.id ? ' sel' : '') + (drag?.id === it.id ? ' dragging' : '')}
+                onPointerDown={(e) => down(e, it.id, false)}>
+                <span className="nname">{it.name}</span>
+                <span className="nprice">{money(it.price)}</span>
+                <button className="more" aria-label={`Edit ${it.name}`} onClick={() => setSheet({ id: it.id })}>⋯</button>
+                <button className="dot" aria-label={`Drag ${it.name} to a person`} onPointerDown={(e) => { e.stopPropagation(); down(e, it.id, true); }} style={{ touchAction: 'none' }} />
+              </li>
+            );
+          })}
+          <li><button className="link" onClick={() => { const id = uid(); up((b) => { b.items.push({ id, name: 'Item', qty: 1, price: 0 }); return b; }); setSheet({ id }); }}>+ Add item</button></li>
+        </ul>
+        <div className="pcol">
+          {[...bill.people.map((p) => ({ ...p, total: shares[p.id] || 0 })), { id: '*', name: 'Everyone', color: '', total: -1 }].map((p) => (
+            <button key={p.id} ref={(el) => { if (el) personEls.current.set(p.id, el); else personEls.current.delete(p.id); }}
+              className={'pnode' + (drag?.hover === p.id ? ' hot' : '') + (sel ? ' ready' : '') + (sel && p.id !== '*' && bill.assign[sel]?.[p.id] ? ' linked' : '')}
+              style={{ ['--pc' as string]: p.color || 'var(--mut)' }} onClick={() => tapPerson(p.id)} aria-label={p.id === '*' ? 'Everyone' : `${p.name}, ${money(p.total)}`}>
+              {p.id === '*' ? <span className="av all">ALL</span> : <Avatar p={p as Person} size={36} />}
+              <span className="pmeta"><small>{p.name}</small>{p.total >= 0 && <b>{money(p.total)}</b>}</span>
+            </button>
+          ))}
+        </div>
       </div>
-      <p className="muted hint">Drag ⠿ onto a person, or tap an item for options.</p>
-      <ul className="items">
-        {bill.items.map((it) => {
-          const a = bill.assign[it.id] || {};
-          const who = bill.people.filter((p) => a[p.id] > 0);
-          return (
-            <li key={it.id} className={who.length ? '' : 'todo'}>
-              <div className="irow">
-                <span className="handle" onPointerDown={(e) => { e.preventDefault(); setDrag({ id: it.id, x: e.clientX, y: e.clientY, name: it.name }); }}>⠿</span>
-                <input className="iname" value={it.name} aria-label="Item name" onChange={(e) => up((b) => { b.items.find((x) => x.id === it.id)!.name = e.target.value; return b; })} />
-                <input className="iprice" inputMode="decimal" aria-label="Price" defaultValue={it.price.toFixed(2)} onBlur={(e) => { const v = parseFloat(e.target.value); up((b) => { b.items.find((x) => x.id === it.id)!.price = isNaN(v) ? 0 : Math.round(v * 100) / 100; return b; }); e.target.value = (isNaN(v) ? 0 : v).toFixed(2); }} />
-                <button className="ghost sm" aria-label="Options" onClick={() => setOpen(open === it.id ? null : it.id)}>{open === it.id ? '▴' : '▾'}</button>
-              </div>
-              <div className="who">
-                {who.map((p) => <Avatar key={p.id} p={p} size={24} />)}
-                <select value="" aria-label="Assign to" onChange={(e) => e.target.value && give(it.id, e.target.value)}>
-                  <option value="">{who.length ? 'Add / remove…' : 'Assign to…'}</option>
-                  <option value="*">Everyone (split evenly)</option>
-                  {bill.people.map((p) => <option key={p.id} value={p.id}>{a[p.id] ? '✓ ' : ''}{p.name}</option>)}
-                </select>
-              </div>
-              {open === it.id && (
-                <div className="opts">
-                  {bill.people.map((p) => (
-                    <div key={p.id} className="orow">
-                      <Avatar p={p} size={24} /><span>{p.name}</span>
-                      <Stepper value={a[p.id] || 0} set={(n) => up((b) => { (b.assign[it.id] ||= {})[p.id] = n; return b; })} />
-                    </div>
-                  ))}
-                  <p className="muted">Shares: e.g. 2 and 1 means one person pays twice as much.</p>
-                  <button className="link danger" onClick={() => up((b) => { b.items = b.items.filter((x) => x.id !== it.id); delete b.assign[it.id]; return b; })}>Delete item</button>
-                </div>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-      <button className="link" onClick={() => up((b) => { b.items.push({ id: uid(), name: 'Item', qty: 1, price: 0 }); return b; })}>+ Add item</button>
 
       <div className="card charges">
         <div className="orow"><span>Items</span><b>{money(sum)}</b></div>
@@ -226,7 +299,37 @@ function AssignStep({ bill, up, next, detected, total, unassigned }: { bill: Bil
         {unassigned > 0 && <p className="warn">{money(unassigned)} not assigned yet.</p>}
       </div>
       <button className="primary" onClick={next}>Next: settle up →</button>
-      {drag && <div className="ghostitem" style={{ left: drag.x, top: drag.y }}>{drag.name}</div>}
+
+      {sheetItem && (
+        <div className="backdrop" onClick={() => setSheet(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="irow">
+              <input className="iname" value={sheetItem.name} aria-label="Item name" onChange={(e) => up((b) => { b.items.find((x) => x.id === sheetItem.id)!.name = e.target.value; return b; })} />
+              <input className="iprice" inputMode="decimal" aria-label="Price" defaultValue={sheetItem.price.toFixed(2)} onBlur={(e) => { const v = parseFloat(e.target.value); up((b) => { b.items.find((x) => x.id === sheetItem.id)!.price = isNaN(v) ? 0 : Math.round(v * 100) / 100; return b; }); }} />
+            </div>
+            <select value="" aria-label="Assign to" onChange={(e) => e.target.value && link(sheetItem.id, e.target.value, e.target.value !== '*')}>
+              <option value="">Assign to…</option>
+              <option value="*">Everyone (split evenly)</option>
+              {bill.people.map((p) => <option key={p.id} value={p.id}>{bill.assign[sheetItem.id]?.[p.id] ? '✓ ' : ''}{p.name}</option>)}
+            </select>
+            {bill.people.map((p) => {
+              const w = bill.assign[sheetItem.id]?.[p.id] || 0;
+              return (
+                <div key={p.id} className={'orow' + (sheet!.pid === p.id ? ' focus' : '')}>
+                  <Avatar p={p} size={28} /><span className="grow">{p.name}</span>
+                  <Stepper value={w} set={(n) => { buzz(6); up((b) => { (b.assign[sheetItem.id] ||= {})[p.id] = n; return b; }); }} />
+                  {w > 0 && <button className="x" aria-label={`Remove ${p.name}`} onClick={() => { buzz(6); up((b) => { b.assign[sheetItem.id][p.id] = 0; return b; }); }}>×</button>}
+                </div>
+              );
+            })}
+            <p className="muted">Shares: 2 and 1 means one person pays twice as much.</p>
+            <div className="row between">
+              <button className="link danger" onClick={() => { up((b) => { b.items = b.items.filter((x) => x.id !== sheetItem.id); delete b.assign[sheetItem.id]; return b; }); setSheet(null); }}>Delete item</button>
+              <button className="ghost" onClick={() => setSheet(null)}>Done</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
