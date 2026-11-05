@@ -144,147 +144,67 @@ function PeopleStep({ bill, up, next }: { bill: Bill; up: (f: (b: Bill) => Bill)
   );
 }
 
-type Pt = { x: number; y: number };
-type Geo = { w: number; h: number; items: Record<string, Pt>; people: Record<string, Pt> };
 const buzz = (ms = 10) => { try { navigator.vibrate?.(ms); } catch {} };
-const curve = (a: Pt, b: Pt) => { const dx = Math.max(24, (b.x - a.x) / 2); return `M${a.x},${a.y} C${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`; };
+const ini = (n: string) => { const w = n.trim().split(/\s+/); return ((w.length > 1 ? w.map((x) => x[0]).join('') : n).slice(0, 2).toUpperCase()) || '?'; };
 
 function AssignStep({ bill, up, next, detected, total, unassigned, shares }: { bill: Bill; up: (f: (b: Bill) => Bill) => void; next: () => void; detected: string | null; total: number; unassigned: number; shares: Record<string, number> }) {
-  const cont = useRef<HTMLDivElement>(null);
-  const itemEls = useRef(new Map<string, HTMLElement>());
-  const personEls = useRef(new Map<string, HTMLElement>());
-  const [geo, setGeo] = useState<Geo>({ w: 0, h: 0, items: {}, people: {} });
-  const [sel, setSel] = useState<string | null>(null);
-  const [sheet, setSheet] = useState<{ id: string; pid?: string } | null>(null);
-  const [drag, setDrag] = useState<{ id: string; x: number; y: number; hover: string | null } | null>(null);
-  const dr = useRef<{ id: string; sx: number; sy: number; active: boolean; wait: boolean; timer?: number; moved: boolean } | null>(null);
-  const raf = useRef(0);
+  const [sheet, setSheet] = useState<string | null>(null);
+  const [focus, setFocus] = useState<string | null>(null);
+  const press = useRef<{ t: number; x: number; y: number } | null>(null);
 
-  const measure = () => {
-    cancelAnimationFrame(raf.current);
-    raf.current = requestAnimationFrame(() => {
-      const c = cont.current; if (!c) return;
-      const r = c.getBoundingClientRect();
-      const g: Geo = { w: r.width, h: r.height, items: {}, people: {} };
-      itemEls.current.forEach((el, id) => { const b = el.getBoundingClientRect(); g.items[id] = { x: b.right - r.left, y: b.top + b.height / 2 - r.top }; });
-      personEls.current.forEach((el, id) => { const b = el.querySelector('.av')!.getBoundingClientRect(); g.people[id] = { x: b.left - r.left, y: b.top + b.height / 2 - r.top }; });
-      setGeo((old) => (JSON.stringify(old) === JSON.stringify(g) ? old : g));
-    });
-  };
-  useEffect(measure);
-  useEffect(() => {
-    const ro = new ResizeObserver(measure);
-    if (cont.current) ro.observe(cont.current);
-    window.addEventListener('scroll', measure, true); window.addEventListener('resize', measure);
-    return () => { ro.disconnect(); window.removeEventListener('scroll', measure, true); window.removeEventListener('resize', measure); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const personAt = (x: number, y: number) => {
-    let hit: string | null = null;
-    personEls.current.forEach((el, id) => { const b = el.getBoundingClientRect(); if (x >= b.left - 10 && x <= b.right + 10 && y >= b.top - 8 && y <= b.bottom + 8) hit = id; });
-    return hit;
-  };
-  const link = (id: string, pid: string, toggle = false) => up((b) => {
+  const toggle = (id: string, pid: string) => up((b) => {
     const a = (b.assign[id] ||= {});
-    if (pid === '*') b.people.forEach((p) => (a[p.id] = a[p.id] || 1));
-    else if (toggle && a[pid]) a[pid] = 0;
-    else a[pid] = a[pid] || 1;
-    buzz(toggle && !a[pid] ? 6 : 12);
+    if (pid === '*') { const all = b.people.every((p) => a[p.id] > 0); b.people.forEach((p) => (a[p.id] = all ? 0 : a[p.id] || 1)); }
+    else a[pid] = a[pid] ? 0 : 1;
     return b;
   });
-
-  useEffect(() => {
-    const local = (e: PointerEvent) => { const r = cont.current!.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
-    const move = (e: PointerEvent) => {
-      const d = dr.current; if (!d) return;
-      const dist = Math.hypot(e.clientX - d.sx, e.clientY - d.sy);
-      if (dist > 6) d.moved = true;
-      if (!d.active) {
-        if (d.wait) { if (dist > 8) { clearTimeout(d.timer); dr.current = null; } return; }
-        if (dist > 5) { d.active = true; buzz(8); } else return;
-      }
-      e.preventDefault();
-      setDrag({ id: d.id, ...local(e), hover: personAt(e.clientX, e.clientY) });
-    };
-    const end = (e: PointerEvent) => {
-      const d = dr.current; if (!d) return;
-      clearTimeout(d.timer); dr.current = null;
-      if (d.active) { const pid = personAt(e.clientX, e.clientY); if (pid) link(d.id, pid); setDrag(null); }
-      else if (!d.moved && e.type === 'pointerup') setSel((s) => (s === d.id ? null : d.id));
-    };
-    const cancel = () => { const d = dr.current; if (d) clearTimeout(d.timer); if (!d?.active) { dr.current = null; setDrag(null); } };
-    const tm = (e: TouchEvent) => { if (dr.current?.active || dr.current?.wait) { if (dr.current.active) e.preventDefault(); } };
-    window.addEventListener('pointermove', move, { passive: false }); window.addEventListener('pointerup', end); window.addEventListener('pointercancel', cancel);
-    document.addEventListener('touchmove', tm, { passive: false });
-    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); window.removeEventListener('pointercancel', cancel); document.removeEventListener('touchmove', tm); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const down = (e: React.PointerEvent, id: string, handle: boolean) => {
-    if ((e.target as HTMLElement).closest('button:not(.dot)')) return;
-    const touchBody = e.pointerType !== 'mouse' && !handle;
-    const d = { id, sx: e.clientX, sy: e.clientY, active: false, wait: touchBody, moved: false, timer: undefined as number | undefined };
-    if (handle) { e.preventDefault(); d.active = true; buzz(8); const r = cont.current!.getBoundingClientRect(); setDrag({ id, x: e.clientX - r.left, y: e.clientY - r.top, hover: null }); }
-    if (touchBody) d.timer = window.setTimeout(() => { if (dr.current === d && !d.moved) { d.active = true; d.wait = false; buzz(15); const r = cont.current!.getBoundingClientRect(); setDrag({ id, x: d.sx - r.left, y: d.sy - r.top, hover: null }); } }, 260);
-    dr.current = d;
+  const startPress = (e: React.PointerEvent, id: string) => {
+    if ((e.target as HTMLElement).closest('button,input,select')) return;
+    const t = window.setTimeout(() => { buzz(15); setSheet(id); press.current = null; }, 450);
+    press.current = { t, x: e.clientX, y: e.clientY };
   };
-  const tapPerson = (pid: string) => { if (sel) link(sel, pid, pid !== '*'); };
+  const movePress = (e: React.PointerEvent) => { const p = press.current; if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > 8) { clearTimeout(p.t); press.current = null; } };
+  const endPress = () => { if (press.current) { clearTimeout(press.current.t); press.current = null; } };
 
   const done = bill.items.filter((it) => Object.values(bill.assign[it.id] || {}).some((w) => w > 0)).length;
   const sum = itemsSum(bill.items);
-  const pc = (pid: string) => (pid === '*' ? 'var(--mut)' : bill.people.find((p) => p.id === pid)?.color || '#999');
-  const sheetItem = sheet && bill.items.find((i) => i.id === sheet.id);
+  const sheetItem = sheet ? bill.items.find((i) => i.id === sheet) : null;
 
   return (
-    <section>
+    <section className="assign2">
       <div className="progress"><div style={{ width: `${bill.items.length ? (done / bill.items.length) * 100 : 0}%` }} /></div>
-      <p className="muted hint">{done === bill.items.length ? '✓ All items assigned' : `${done} of ${bill.items.length} assigned · drag an item to a person, or tap item then person`}</p>
-      <div className="map" ref={cont}>
-        <svg className="lines" width={geo.w} height={geo.h}>
-          {bill.items.flatMap((it) => {
-            const a = geo.items[it.id]; if (!a) return [];
-            return Object.entries(bill.assign[it.id] || {}).filter(([, w]) => w > 0).map(([pid, w]) => {
-              const b = geo.people[pid]; if (!b) return null;
-              const d = curve(a, b), dim = sel && sel !== it.id;
-              return (
-                <g key={it.id + pid} className={dim ? 'dim' : ''}>
-                  <path d={d} pathLength={1} className="ln" stroke={pc(pid)} strokeWidth={w > 1 ? 4 : 2.5} />
-                  {w > 1 && <text x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 4} className="wt" fill={pc(pid)}>×{w}</text>}
-                  <path d={d} className="hit" onClick={() => { buzz(6); setSheet({ id: it.id, pid }); }} />
-                </g>
-              );
-            });
-          })}
-          {drag && geo.items[drag.id] && <path d={curve(geo.items[drag.id], drag.hover && geo.people[drag.hover] ? geo.people[drag.hover] : drag)} className="ln live" stroke={drag.hover ? pc(drag.hover) : 'var(--acc)'} strokeWidth={3} />}
-        </svg>
-        <ul className="nodes">
-          {bill.items.map((it) => {
-            const on = Object.values(bill.assign[it.id] || {}).some((w) => w > 0);
-            return (
-              <li key={it.id} ref={(el) => { if (el) itemEls.current.set(it.id, el); else itemEls.current.delete(it.id); }}
-                className={'node' + (on ? '' : ' todo') + (sel === it.id ? ' sel' : '') + (drag?.id === it.id ? ' dragging' : '')}
-                onPointerDown={(e) => down(e, it.id, false)}>
-                <span className="nname">{it.name}</span>
-                <span className="nprice">{money(it.price)}</span>
-                <button className="more" aria-label={`Edit ${it.name}`} onClick={() => setSheet({ id: it.id })}>⋯</button>
-                <button className="dot" aria-label={`Drag ${it.name} to a person`} onPointerDown={(e) => { e.stopPropagation(); down(e, it.id, true); }} style={{ touchAction: 'none' }} />
-              </li>
-            );
-          })}
-          <li><button className="link" onClick={() => { const id = uid(); up((b) => { b.items.push({ id, name: 'Item', qty: 1, price: 0 }); return b; }); setSheet({ id }); }}>+ Add item</button></li>
-        </ul>
-        <div className="pcol">
-          {[...bill.people.map((p) => ({ ...p, total: shares[p.id] || 0 })), { id: '*', name: 'Everyone', color: '', total: -1 }].map((p) => (
-            <button key={p.id} ref={(el) => { if (el) personEls.current.set(p.id, el); else personEls.current.delete(p.id); }}
-              className={'pnode' + (drag?.hover === p.id ? ' hot' : '') + (sel ? ' ready' : '') + (sel && p.id !== '*' && bill.assign[sel]?.[p.id] ? ' linked' : '')}
-              style={{ ['--pc' as string]: p.color || 'var(--mut)' }} onClick={() => tapPerson(p.id)} aria-label={p.id === '*' ? 'Everyone' : `${p.name}, ${money(p.total)}`}>
-              {p.id === '*' ? <span className="av all">ALL</span> : <Avatar p={p as Person} size={36} />}
-              <span className="pmeta"><small>{p.name}</small>{p.total >= 0 && <b>{money(p.total)}</b>}</span>
-            </button>
-          ))}
-        </div>
-      </div>
+      <p className="muted hint">{done === bill.items.length ? '✓ All items assigned' : `${done} of ${bill.items.length} assigned · tap who had each item`}</p>
+      <ul className="rlist">
+        {bill.items.map((it) => {
+          const a = bill.assign[it.id] || {};
+          const who = bill.people.filter((p) => a[p.id] > 0);
+          const all = who.length === bill.people.length && who.length > 0;
+          const cls = 'ritem' + (who.length ? '' : ' todo') + (focus ? (a[focus] > 0 ? ' hl' : ' faded') : '');
+          return (
+            <li key={it.id} className={cls} onPointerDown={(e) => startPress(e, it.id)} onPointerMove={movePress} onPointerUp={endPress} onPointerCancel={endPress} onContextMenu={(e) => e.preventDefault()}>
+              <span className="strip">{who.map((p) => <i key={p.id} style={{ background: p.color, flex: a[p.id] }} />)}</span>
+              <div className="rhead">
+                <span className="rname">{it.name}</span>
+                <span className="rprice">{money(it.price)}</span>
+                <button className="more" aria-label={`Edit ${it.name}`} onClick={() => setSheet(it.id)}>⋯</button>
+              </div>
+              <div className="bubbles">
+                {bill.people.map((p) => {
+                  const w = a[p.id] || 0;
+                  return (
+                    <button key={p.id} className={'bub' + (w ? ' on' : '')} style={{ ['--pc' as string]: p.color }} aria-pressed={w > 0} aria-label={`${p.name}${w ? ' (selected)' : ''}`}
+                      onClick={() => { buzz(w ? 6 : 12); toggle(it.id, p.id); }}>
+                      {ini(p.name)}{w > 0 && <span className="chk">{w > 1 ? '×' + w : '✓'}</span>}
+                    </button>
+                  );
+                })}
+                <button className={'bub allb' + (all ? ' on' : '')} aria-pressed={all} aria-label="Everyone" onClick={() => { buzz(12); toggle(it.id, '*'); }}>All{all && <span className="chk">✓</span>}</button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <button className="link" onClick={() => { const id = uid(); up((b) => { b.items.push({ id, name: 'Item', qty: 1, price: 0 }); return b; }); setSheet(id); }}>+ Add item</button>
 
       <div className="card charges">
         <div className="orow"><span>Items</span><b>{money(sum)}</b></div>
@@ -300,6 +220,15 @@ function AssignStep({ bill, up, next, detected, total, unassigned, shares }: { b
       </div>
       <button className="primary" onClick={next}>Next: settle up →</button>
 
+      <div className="totbar" role="toolbar" aria-label="Totals per person">
+        {bill.people.map((p) => (
+          <button key={p.id} className={'tot' + (focus === p.id ? ' on' : '')} style={{ ['--pc' as string]: p.color }} aria-pressed={focus === p.id}
+            onClick={() => { buzz(6); setFocus((f) => (f === p.id ? null : p.id)); }}>
+            <Avatar p={p} size={28} /><span><small>{p.name}</small><b>{money(shares[p.id] || 0)}</b></span>
+          </button>
+        ))}
+      </div>
+
       {sheetItem && (
         <div className="backdrop" onClick={() => setSheet(null)}>
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -307,7 +236,7 @@ function AssignStep({ bill, up, next, detected, total, unassigned, shares }: { b
               <input className="iname" value={sheetItem.name} aria-label="Item name" onChange={(e) => up((b) => { b.items.find((x) => x.id === sheetItem.id)!.name = e.target.value; return b; })} />
               <input className="iprice" inputMode="decimal" aria-label="Price" defaultValue={sheetItem.price.toFixed(2)} onBlur={(e) => { const v = parseFloat(e.target.value); up((b) => { b.items.find((x) => x.id === sheetItem.id)!.price = isNaN(v) ? 0 : Math.round(v * 100) / 100; return b; }); }} />
             </div>
-            <select value="" aria-label="Assign to" onChange={(e) => e.target.value && link(sheetItem.id, e.target.value, e.target.value !== '*')}>
+            <select value="" aria-label="Assign to" onChange={(e) => e.target.value && toggle(sheetItem.id, e.target.value)}>
               <option value="">Assign to…</option>
               <option value="*">Everyone (split evenly)</option>
               {bill.people.map((p) => <option key={p.id} value={p.id}>{bill.assign[sheetItem.id]?.[p.id] ? '✓ ' : ''}{p.name}</option>)}
@@ -315,10 +244,9 @@ function AssignStep({ bill, up, next, detected, total, unassigned, shares }: { b
             {bill.people.map((p) => {
               const w = bill.assign[sheetItem.id]?.[p.id] || 0;
               return (
-                <div key={p.id} className={'orow' + (sheet!.pid === p.id ? ' focus' : '')}>
+                <div key={p.id} className="orow">
                   <Avatar p={p} size={28} /><span className="grow">{p.name}</span>
                   <Stepper value={w} set={(n) => { buzz(6); up((b) => { (b.assign[sheetItem.id] ||= {})[p.id] = n; return b; }); }} />
-                  {w > 0 && <button className="x" aria-label={`Remove ${p.name}`} onClick={() => { buzz(6); up((b) => { b.assign[sheetItem.id][p.id] = 0; return b; }); }}>×</button>}
                 </div>
               );
             })}
