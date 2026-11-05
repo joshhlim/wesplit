@@ -80,6 +80,7 @@ export default function SharedBill({ id, initial }: { id: string; initial: Share
           {s.breakdown && <div className="soft">
             <div className="line"><span>Items</span><span className="num">{money(s.breakdown.gross / 100)}</span></div>
             {s.breakdown.itemDisc > 0 && <div className="line disc"><span>Item discounts</span><span className="num">−{money(s.breakdown.itemDisc / 100)}</span></div>}
+            {(s.breakdown.receiptDisc || 0) > 0 && <div className="line disc"><span><Tag size={13} /> {s.rlabel || 'Receipt discount'}</span><span className="num">−{money((s.breakdown.receiptDisc || 0) / 100)}</span></div>}
             {s.breakdown.voucher > 0 && <div className="line disc"><span><Tag size={13} /> Voucher{s.voucher ? ` (${s.voucher})` : ''}</span><span className="num">−{money(s.breakdown.voucher / 100)}</span></div>}
             {s.breakdown.sc > 0 && <div className="line muted"><span>Service charge 10%</span><span className="num">{money(s.breakdown.sc / 100)}</span></div>}
             {s.breakdown.gst > 0 && <div className="line muted"><span>GST 9%</span><span className="num">{money(s.breakdown.gst / 100)}</span></div>}

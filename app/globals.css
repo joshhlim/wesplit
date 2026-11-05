@@ -313,3 +313,19 @@ s{opacity:.55;font-weight:600;margin-right:2px}
 .receipt-img{width:100%;max-height:62dvh;object-fit:contain;border-radius:24px;background:var(--soft)}
 .slist li.mine{box-shadow:inset 0 0 0 2px var(--brand)}
 .shared .soft{border-radius:28px;padding:var(--s4)}
+/* v8.1 overflow safety: clip (not hidden) keeps position:sticky working */
+html,body{overflow-x:clip;max-width:100%}
+.screen,.stack,.sheet,.soft,.rlist,.ritem{min-width:0;max-width:100%}
+.sheet{overflow-x:hidden}
+.fields{min-width:0}.field{min-width:0}.field.grow{flex:1 1 auto}
+.field input,.field select{width:100%;min-width:0;font-size:16px}
+.pill-field input,.pill-input,.voucher input{font-size:max(16px,1em)}
+.sheet .line,.voucher .line{min-width:0;gap:var(--s2)}
+.vrow{display:flex;gap:var(--s2);align-items:center;min-width:0}
+.vinput{flex:1;min-width:0;display:flex;align-items:center;gap:4px;min-height:52px;padding:0 var(--s4);border-radius:999px;background:var(--soft)}
+.vinput:focus-within{box-shadow:0 0 0 2px var(--brand)}
+.vinput input{flex:1;min-width:0;width:100%;font-weight:800;font-size:18px}
+.vpre{font-weight:800;color:var(--muted)}
+.seg.sm{flex:none;width:108px}.seg.sm button{min-height:44px;font-size:var(--t-md)}
+.disc-amt{color:var(--brand)}
+.ok-note{display:flex;gap:6px;align-items:center;color:var(--brand);font-weight:700}

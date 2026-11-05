@@ -6,10 +6,10 @@ export type ShareRef = { id: string; token: string };
 type P = { id: string; name: string; color: string; share: number; paid: boolean };
 export type ShareRec = { id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; people: P[];
   items?: { name: string; qty: number | null; price: number; disc?: number; free?: boolean; w?: Record<string, number>; who: string[] }[]; share?: ShareRef;
-  voucher?: string; breakdown?: object; location?: string };
+  voucher?: string; rlabel?: string; breakdown?: object; location?: string };
 
 export const snapshotOf = (r: ShareRec) => ({
-  place: r.place, location: r.location, date: r.date, total: r.total, mode: r.mode, payee: r.payee, items: r.items || [], voucher: r.voucher, breakdown: r.breakdown,
+  place: r.place, location: r.location, date: r.date, total: r.total, mode: r.mode, payee: r.payee, items: r.items || [], voucher: r.voucher, rlabel: r.rlabel, breakdown: r.breakdown,
   people: r.people.map((p, i) => ({ ...p, name: i === 0 ? (r.payee.name || 'Host') : p.name })),
 });
 export const shareUrl = (id: string) => `${location.origin}/b/${id}`;

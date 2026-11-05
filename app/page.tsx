@@ -4,7 +4,7 @@ import QRCode from 'qrcode';
 import { Camera, ChevronLeft, Plus, Minus, X, Check, Ellipsis, Sun, Moon, Share2, Download, Copy, Trash2, Lock, Receipt, CircleAlert, RotateCcw, MessageCircle, Send, PenLine, WifiOff, ArrowRight, QrCode, Users } from 'lucide-react';
 import { MODES, detectMode, split, paynowPayload, normalizeMobile, itemNetCents } from '@/lib/split.mjs';
 import { putPhoto, compress, getPhoto, delLocal, moveLocal, removeCloud, removeAllCloud } from '@/lib/photos';
-import { MapPin, Image as ImageIc, Tag, Percent, Gift, HandCoins } from 'lucide-react';
+import { MapPin, Image as ImageIc, Tag, HandCoins } from 'lucide-react';
 import { Mark } from '@/components/brand';
 import { History as HistoryIc, CircleCheck, Circle, Bell, UserRound, Mail, LogOut, Cloud, CloudOff } from 'lucide-react';
 import { supa } from '@/lib/supabase';
@@ -14,8 +14,8 @@ import { Link2, Link2Off } from 'lucide-react';
 import type { User } from '@supabase/supabase-js';
 
 type Voucher = { kind: 'pct' | 'amt'; value: number };
-type BD = { gross: number; itemDisc: number; voucher: number; sub: number; sc: number; gst: number; total: number };
-type Rec = { updatedAt?: number; items?: { name: string; qty: number | null; price: number; disc?: number; free?: boolean; w?: Record<string, number>; who: string[] }[]; share?: ShareRef; voucher?: string; breakdown?: BD; location?: string; photo?: boolean; edited?: boolean; id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; people: { id: string; name: string; color: string; share: number; paid: boolean }[] };
+type BD = { gross: number; itemDisc: number; receiptDisc?: number; voucher: number; sub: number; sc: number; gst: number; total: number };
+type Rec = { updatedAt?: number; items?: { name: string; qty: number | null; price: number; disc?: number; free?: boolean; w?: Record<string, number>; who: string[] }[]; share?: ShareRef; voucher?: string; rlabel?: string; breakdown?: BD; location?: string; photo?: boolean; edited?: boolean; id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; people: { id: string; name: string; color: string; share: number; paid: boolean }[] };
 type Friend = { name: string; color: string; count: number };
 const load = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } };
 
@@ -23,7 +23,7 @@ type Item = { id: string; name: string; qty: number | null; price: number; disc?
 type Person = { id: string; name: string; color: string };
 type Assign = Record<string, Record<string, number>>;
 type Mode = keyof typeof MODES;
-type Bill = { id?: string; merchant: string | null; total: number | null; items: Item[]; people: Person[]; assign: Assign; mode: Mode; payer: string; voucher?: Voucher; photo?: boolean; location?: string };
+type Bill = { id?: string; merchant: string | null; total: number | null; items: Item[]; people: Person[]; assign: Assign; mode: Mode; payer: string; voucher?: Voucher; photo?: boolean; location?: string; receiptOff?: number; discLabels?: string[] };
 type Up = (f: (b: Bill) => Bill) => void;
 type Toast = { msg: string; undo?: () => void } | null;
 
@@ -172,10 +172,10 @@ export default function Home() {
       const d = await r.json().catch(() => ({ error: 'Something went wrong. Please try again.' }));
       if (!r.ok) throw new Error(d.error);
       if (!d.items?.length) throw new Error("We couldn't find any items. Try a sharper photo, or enter them yourself.");
-      const items: Item[] = d.items.map((i: { name: string; qty: number | null; price: number }) => ({ id: uid(), name: i.name, qty: i.qty, price: i.price }));
+      const items: Item[] = d.items.map((i: { name: string; qty: number | null; price: number; disc?: number }) => ({ id: uid(), name: i.name, qty: i.qty, price: i.price, ...(i.disc ? { disc: i.disc } : {}) }));
       up((b) => {
-        const auto = detectMode(items, d.total) as Mode | null;
-        return { ...b, voucher: undefined, merchant: d.merchant, total: d.total, items, assign: {}, mode: auto || (d.gst ? (d.serviceCharge ? 'sg' : 'gst') : 'sg') };
+        const auto = detectMode(items, d.total, undefined, d.receiptOff || 0) as Mode | null;
+        return { ...b, voucher: undefined, receiptOff: d.receiptOff || 0, discLabels: d.discLabels || [], merchant: d.merchant, total: d.total, items, assign: {}, mode: auto || (d.gst ? (d.serviceCharge ? 'sg' : 'gst') : 'sg') };
       });
       go(1);
     } catch (e) {
@@ -189,8 +189,8 @@ export default function Home() {
     notify({ msg: 'Started a new bill', undo: () => { setBill(prev.bill); setStep(prev.step); } });
   };
 
-  const result = useMemo(() => split(bill.items, bill.people, bill.assign, bill.mode, bill.total, bill.voucher), [bill]);
-  const detected = detectMode(bill.items, bill.total, bill.voucher);
+  const result = useMemo(() => split(bill.items, bill.people, bill.assign, bill.mode, bill.total, bill.voucher, bill.receiptOff || 0), [bill]);
+  const detected = detectMode(bill.items, bill.total, bill.voucher, bill.receiptOff || 0);
   const can = (i: number) => i === 0 || bill.items.length > 0;
 
   return (
@@ -225,7 +225,7 @@ export default function Home() {
 
       <div key={step} className={'screen ' + (dir > 0 ? 'fwd' : 'back')}>
         {step === 0 && <ScanStep busy={busy} err={err} onFile={scan} hasBill={bill.items.length > 0} resume={() => go(2)} openHistory={() => setView('history')} openFriends={() => setView('friends')} owed={history.reduce((s, r) => s + r.people.slice(1).filter((p) => !p.paid).reduce((a, p) => a + Math.round(p.share * 100), 0), 0) / 100}
-          onManual={() => { up((b) => ({ ...b, merchant: null, total: null, assign: {}, items: [{ id: uid(), name: 'Item 1', qty: 1, price: 0 }] })); go(1); }} />}
+          onManual={() => { up((b) => ({ ...b, receiptOff: 0, discLabels: [], voucher: undefined, merchant: null, total: null, assign: {}, items: [{ id: uid(), name: 'Item 1', qty: 1, price: 0 }] })); go(1); }} />}
         {step === 1 && <PeopleStep bill={bill} up={up} notify={notify} next={() => go(2)} friends={friends} setFriends={setFriends} />}
         {step === 2 && <AssignStep bill={bill} up={up} notify={notify} next={() => go(3)} detected={detected} total={result.total} shares={result.shares} bd={result.breakdown} />}
         {step === 3 && <SettleStep bill={bill} notify={notify} shares={result.shares} total={result.total} payee={payee} setPayee={setPayee} saveRec={saveRec} bd={result.breakdown} />}
@@ -489,7 +489,8 @@ function AssignStep({ bill, up, notify, next, detected, total, shares, bd }: { b
 
       <div className="soft">
         <div className="line"><span>Items</span><b className="num">{money(bd.gross / 100)}</b></div>
-        {bd.itemDisc > 0 && <div className="line disc"><span>Item discounts</span><b className="num">−{money(bd.itemDisc / 100)}</b></div>}
+        {bd.itemDisc > 0 && <div className="line disc"><span>Item discounts (receipt)</span><b className="num">−{money(bd.itemDisc / 100)}</b></div>}
+        {(bd.receiptDisc || 0) > 0 && <div className="line disc"><span>{bill.discLabels?.length ? bill.discLabels.join(', ') : 'Receipt discount'}</span><b className="num">−{money((bd.receiptDisc || 0) / 100)}</b></div>}
         <VoucherPicker v={bill.voucher} set={(v) => up((b) => ({ ...b, voucher: v }))} off={bd.voucher} />
         <div className="line">
           <span>Charges</span>
@@ -543,13 +544,7 @@ function AssignStep({ bill, up, notify, next, detected, total, shares, bd }: { b
               <button className="chip-btn" onClick={() => { buzz(8); up((b) => { const a = (b.assign[sheetItem.id] ||= {}); const on = b.people.filter((p) => a[p.id] > 0); (on.length ? on : b.people).forEach((p) => (a[p.id] = 1)); return b; }); }}>Split evenly</button>
             </div>
             <PortionBar item={sheetItem} people={bill.people} a={bill.assign[sheetItem.id] || {}} />
-            <div className="sub">Discount</div>
-            <div className="share">
-              <button className={'chip-btn' + (sheetItem.free ? ' on' : '')} aria-pressed={!!sheetItem.free} onClick={() => { buzz(10); up((b) => { const x = b.items.find((i) => i.id === sheetItem.id)!; x.free = !x.free; return b; }); }}><Gift size={16} /> 1-for-1 · Free</button>
-              {[10, 20, 50].map((pc) => { const v = Math.round(sheetItem.price * pc) / 100; const on = !sheetItem.free && sheetItem.disc === v; return (
-                <button key={pc} className={'chip-btn' + (on ? ' on' : '')} aria-pressed={on} disabled={!!sheetItem.free} onClick={() => { buzz(8); up((b) => { const x = b.items.find((i) => i.id === sheetItem.id)!; x.disc = on ? 0 : v; return b; }); }}><Percent size={14} /> {pc}% off</button>); })}
-            </div>
-            {!sheetItem.free && <div className="line"><span>Amount off</span><MoneyStepper label="Amount off" value={sheetItem.disc || 0} max={sheetItem.price} set={(n) => up((b) => { b.items.find((x) => x.id === sheetItem.id)!.disc = n; return b; })} /></div>}
+            {(sheetItem.free || (sheetItem.disc || 0) > 0) && <p className="note ok-note"><Tag size={14} /> {sheetItem.free ? 'Free on the receipt' : `Receipt discount −${money(sheetItem.disc!)}`} · pays {money(itemNetCents(sheetItem) / 100)}</p>}
             <div className="row between">
               <button className="btn text danger" onClick={() => del(sheetItem.id)}><Trash2 size={18} /> Delete</button>
               <button className="btn primary compact" onClick={() => setSheet(null)}>Done</button>
@@ -595,7 +590,7 @@ function SettleStep({ bill, notify, shares, total, payee, setPayee, saveRec, bd 
   const sig = JSON.stringify([bill.id, bill.people, shares, total, payee, bill.merchant, bill.items, bill.voucher, bill.photo]);
   useEffect(() => {
     if (!normalizeMobile(payee.mobile) || !bill.id || bill.people.length < 2 || !bill.items.length) return;
-    saveRec({ id: bill.id, place: bill.merchant || 'Bill', date: new Date().toISOString(), total, mode: MODES[bill.mode as Mode].label, payee, photo: bill.photo, location: bill.location, voucher: vLabel(bill.voucher), breakdown: bd, items: bill.items.map((it) => { const w = Object.fromEntries(Object.entries(bill.assign[it.id] || {}).filter(([, v]) => v > 0)); return { name: it.name, qty: it.qty, price: it.price, disc: it.disc || undefined, free: it.free || undefined, w, who: Object.keys(w) }; }), people: bill.people.map((p) => ({ id: p.id, name: p.name, color: p.color, share: shares[p.id] || 0, paid: false })) });
+    saveRec({ id: bill.id, place: bill.merchant || 'Bill', date: new Date().toISOString(), total, mode: MODES[bill.mode as Mode].label, payee, photo: bill.photo, location: bill.location, voucher: vLabel(bill.voucher), rlabel: bill.discLabels?.join(', ') || undefined, breakdown: bd, items: bill.items.map((it) => { const w = Object.fromEntries(Object.entries(bill.assign[it.id] || {}).filter(([, v]) => v > 0)); return { name: it.name, qty: it.qty, price: it.price, disc: it.disc || undefined, free: it.free || undefined, w, who: Object.keys(w) }; }), people: bill.people.map((p) => ({ id: p.id, name: p.name, color: p.color, share: shares[p.id] || 0, paid: false })) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sig]);
   const [editing, setEditing] = useState(false);
@@ -824,7 +819,7 @@ function BillDetail({ rec, setHistory, notify, close, user }: { rec?: Rec; setHi
         <PlaceTag rec={rec} save={(place, location) => patch((r) => ({ ...r, place, location, edited: true }))} />
         <h1 className="num huge">{money(owedOf(rec))}</h1>
         <p className="muted small">{fmtDate(rec.date)} · {paid === others.length ? 'Everyone has paid' : `${paid} of ${others.length} paid`} · {money(rec.total)} total</p>
-        {bd && (bd.itemDisc > 0 || bd.voucher > 0) && <p className="ok small"><Tag size={13} /> Saved {money((bd.itemDisc + bd.voucher) / 100)} with discounts{rec.voucher ? ` (${rec.voucher})` : ''}</p>}
+        {bd && (bd.itemDisc + (bd.receiptDisc || 0) + bd.voucher > 0) && <p className="ok small"><Tag size={13} /> Saved {money((bd.itemDisc + (bd.receiptDisc || 0) + bd.voucher) / 100)} with discounts{rec.voucher ? ` (${rec.voucher})` : ''}</p>}
       </div>
       <ul className="settle">
         {others.map((p) => (
@@ -907,40 +902,27 @@ function Confetti({ colors }: { colors: string[] }) {
   return <div className="confetti" aria-hidden="true">{bits.map((b, i) => <i key={i} style={{ left: b.l + '%', background: b.c, width: b.w, height: b.round ? b.w : b.w * 1.6, borderRadius: b.round ? '50%' : 3, animationDelay: b.d + 'ms', animationDuration: b.t + 'ms', ['--r' as string]: b.r + 'deg' }} />)}</div>;
 }
 
-function MoneyStepper({ value, set, max, label, step = 0.5 }: { value: number; set: (n: number) => void; max: number; label: string; step?: number }) {
-  const r = (n: number) => Math.round(Math.min(max, Math.max(0, n)) * 100) / 100;
-  return (
-    <span className="stepper" role="group" aria-label={label}>
-      <button onClick={() => { buzz(6); set(r(value - step)); }} aria-label="Less" disabled={value <= 0}><Minus size={16} /></button>
-      <b className="num">{money(value)}</b>
-      <button onClick={() => { buzz(6); set(r(value + step)); }} aria-label="More" disabled={value >= max}><Plus size={16} /></button>
-    </span>
-  );
-}
 
 const vLabel = (v?: Voucher) => (!v || !(v.value > 0) ? undefined : v.kind === 'pct' ? `${v.value}% off` : `${money(v.value)} off`);
 function VoucherPicker({ v, set, off }: { v?: Voucher; set: (v?: Voucher) => void; off: number }) {
-  const [open, setOpen] = useState(!!v);
-  if (!open) return <div className="line"><span>Voucher</span><button className="chip-btn" onClick={() => { setOpen(true); }}><Tag size={14} /> Add voucher</button></div>;
-  const kind = v?.kind || 'pct';
+  const kind = v?.kind || 'amt';
+  const [txt, setTxt] = useState(v?.value ? String(v.value) : '');
+  const apply = (t: string, k: 'pct' | 'amt') => { const n = parseFloat(t); set(t.trim() === '' || isNaN(n) || n <= 0 ? (t.trim() === '' ? undefined : { kind: k, value: 0 }) : { kind: k, value: Math.round(Math.min(k === 'pct' ? 100 : 10000, n) * 100) / 100 }); };
   return (
     <div className="voucher">
-      <div className="line"><span className="row gap8"><Tag size={16} /> Voucher</span>{off > 0 ? <b className="num ok">−{money(off / 100)}</b> : <span className="muted small">Pick one</span>}</div>
-      <div className="seg" role="radiogroup" aria-label="Voucher type">
-        {(['pct', 'amt'] as const).map((k) => <button key={k} role="radio" aria-checked={kind === k} className={kind === k ? 'on' : ''} onClick={() => set({ kind: k, value: k === kind ? v?.value || 0 : 0 })}>{k === 'pct' ? '% off' : 'S$ off'}</button>)}
+      <div className="line"><span className="row gap8"><Tag size={16} /> Extra voucher</span>{off > 0 && <b className="num disc-amt">−{money(off / 100)}</b>}</div>
+      <div className="vrow">
+        <label className="vinput">
+          {kind === 'amt' && <span className="vpre">S$</span>}
+          <input aria-label={kind === 'pct' ? 'Voucher percent off' : 'Voucher amount off'} inputMode="decimal" placeholder="0" value={txt}
+            onChange={(e) => { const t = e.target.value.replace(/[^0-9.]/g, '').replace(/(\..*)\./g, '$1').slice(0, 7); setTxt(t); apply(t, kind); }} />
+          {kind === 'pct' && <span className="vpre">%</span>}
+        </label>
+        <div className="seg sm" role="radiogroup" aria-label="Voucher type">
+          {(['amt', 'pct'] as const).map((k) => <button key={k} role="radio" aria-checked={kind === k} className={kind === k ? 'on' : ''} onClick={() => { buzz(6); apply(txt, k); if (!txt) set({ kind: k, value: 0 }); }}>{k === 'amt' ? '$' : '%'}</button>)}
+        </div>
       </div>
-      <div className="share">
-        {(kind === 'pct' ? [5, 10, 15, 20, 30, 50] : [3, 5, 10, 15, 20, 50]).map((n) => (
-          <button key={n} className={'chip-btn' + (v?.value === n && v.kind === kind ? ' on' : '')} aria-pressed={v?.value === n && v.kind === kind} onClick={() => { buzz(8); set({ kind, value: n }); }}>{kind === 'pct' ? `${n}%` : `S$${n}`}</button>
-        ))}
-      </div>
-      <div className="line">
-        <span className="small muted">{kind === 'pct' ? 'Fine-tune' : 'Exact amount'}</span>
-        {kind === 'pct' ? <Stepper label="Percent off" value={v?.value || 0} max={100} set={(n) => set({ kind, value: n })} />
-          : <MoneyStepper label="Amount off" value={v?.value || 0} max={1000} set={(n) => set({ kind, value: n })} />}
-      </div>
-      <button className="btn text sm-text" onClick={() => { set(undefined); setOpen(false); }}>Remove voucher</button>
-      <p className="small muted">Taken off before service charge and GST, shared by what each person ordered.</p>
+      <p className="small muted">Only for discounts that aren&apos;t on the receipt. Taken off before service charge and GST.</p>
     </div>
   );
 }
@@ -1060,7 +1042,7 @@ function NudgeRow({ rec, who, amount, payTo, ensure }: { rec: Rec; who: string; 
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   if (!open) return <button className="chip-btn" disabled={busy} onClick={async () => { setBusy(true); const u = await ensure(); setBusy(false); if (u) { setUrl(u); setOpen(true); } }}><Bell size={16} /> {busy ? 'Nudge…' : 'Nudge'}</button>;
-  const saved = rec.breakdown && rec.breakdown.itemDisc + rec.breakdown.voucher > 0 ? ' (after discounts)' : '';
+  const saved = rec.breakdown && rec.breakdown.itemDisc + (rec.breakdown.receiptDisc || 0) + rec.breakdown.voucher > 0 ? ' (after discounts)' : '';
   const text = `Hey ${who}! Gentle nudge for ${rec.place} 🙏 Your share is ${money(amount)}${saved}. PayNow ${payTo === fmtSG(rec.payee.mobile) ? fmtSG(rec.payee.mobile) : `${payTo} (${fmtSG(rec.payee.mobile)})`} or tap your name here for the QR:`;
   return <TextShare text={text} url={url!} label="More" />;
 }
