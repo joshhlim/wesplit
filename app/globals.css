@@ -59,3 +59,8 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
 .qr img{background:#fff;padding:6px;border-radius:10px;width:200px}
 .ghostitem{position:fixed;transform:translate(-50%,-120%);background:var(--acc);color:var(--accfg);padding:6px 12px;border-radius:20px;pointer-events:none;z-index:50;font-size:14px;box-shadow:0 4px 12px #0003}
 footer{text-align:center;color:var(--mut);font-size:12px;margin-top:30px}
+.share{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.share a{text-decoration:none;display:inline-flex;align-items:center}
+.wa{color:#16a34a}.tg{color:#0284c7}
+.shareall{margin-top:12px}
+.settle li{display:flex;flex-direction:column;align-items:stretch}.settle .paynow{align-self:flex-start}

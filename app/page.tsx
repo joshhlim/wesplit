@@ -258,28 +258,120 @@ function SettleStep({ bill, up, shares, total, mobile, setMobile }: { bill: Bill
         {bill.people.map((p) => (
           <li key={p.id}>
             <div className="orow"><span className="row"><Avatar p={p} size={32} /> {p.name}</span><b>{money(shares[p.id] || 0)}</b></div>
-            {p.id !== payer.id && valid && (shares[p.id] || 0) > 0 && <PayQR mobile={mobile} amount={shares[p.id]} who={p.name} />}
+            {p.id !== payer.id && valid && (shares[p.id] || 0) > 0 && <PayQR mobile={mobile} amount={shares[p.id]} who={p.name} payer={payer.name} place={bill.merchant || 'the bill'} />}
             {p.id === payer.id && <small className="muted">Paid the bill</small>}
           </li>
         ))}
       </ul>
       {shares._ > 0 && <p className="warn">{money(shares._)} is still unassigned.</p>}
+      {valid && <ShareAll list={bill.people.filter((p) => p.id !== payer.id && (shares[p.id] || 0) > 0).map((p) => ({ name: p.name, amount: shares[p.id] }))} mobile={mobile} payer={payer.name} place={bill.merchant || 'the bill'} summary={summary} />}
       <button className="primary" onClick={async () => { await navigator.clipboard.writeText(summary); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>{copied ? 'Copied ✓' : 'Copy summary'}</button>
     </section>
   );
 }
 
-function PayQR({ mobile, amount, who }: { mobile: string; amount: number; who: string }) {
+
+const APP_URL = 'https://wesplit-sg.vercel.app';
+const shareText = (who: string, place: string, amount: number, payer: string, mobile: string) =>
+  `Hi ${who}, your share for ${place} is $${amount.toFixed(2)}. Scan to PayNow ${payer} (${normalizeMobile(mobile)}).`;
+const waLink = (t: string) => 'https://wa.me/?text=' + encodeURIComponent(t);
+const tgLink = (t: string) => 'https://t.me/share/url?url=' + encodeURIComponent(APP_URL) + '&text=' + encodeURIComponent(t);
+const safe = (s: string) => s.replace(/[^\w-]+/g, '_');
+
+type Entry = { name: string; amount: number };
+function rr(c: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) { c.beginPath(); c.roundRect(x, y, w, h, r); }
+function fit(c: CanvasRenderingContext2D, t: string, w: number) { while (t.length > 3 && c.measureText(t).width > w) t = t.slice(0, -2) + '…'; return t; }
+
+// Draw share cards (one per entry) on a single PNG: clean app style, white card, PayNow-purple QR.
+async function makeCard(list: Entry[], o: { mobile: string; payer: string; place: string }): Promise<Blob> {
+  const W = 720, CH = 860, PAD = 40;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = 150 + list.length * (CH + 30) + 60;
+  const c = cv.getContext('2d')!;
+  const F = 'system-ui,-apple-system,Segoe UI,Roboto,sans-serif';
+  c.fillStyle = '#f7f8fa'; c.fillRect(0, 0, cv.width, cv.height);
+  c.textBaseline = 'alphabetic';
+  c.font = `800 44px ${F}`; c.fillStyle = '#111827'; c.fillText('We', PAD, 80);
+  const ww = c.measureText('We').width; c.fillStyle = '#10b981'; c.fillText('Split', PAD + ww, 80);
+  c.font = `500 26px ${F}`; c.fillStyle = '#6b7280'; c.fillText(fit(c, o.place, W - 2 * PAD), PAD, 122);
+  let y = 150;
+  for (const e of list) {
+    c.fillStyle = '#fff'; rr(c, PAD, y, W - 2 * PAD, CH, 32); c.fill();
+    c.strokeStyle = '#e5e7eb'; c.lineWidth = 2; c.stroke();
+    c.textAlign = 'center';
+    c.font = `600 34px ${F}`; c.fillStyle = '#111827'; c.fillText(fit(c, e.name, W - 4 * PAD), W / 2, y + 70);
+    c.font = `800 72px ${F}`; c.fillStyle = '#10b981'; c.fillText('S$' + e.amount.toFixed(2), W / 2, y + 155);
+    const qr = document.createElement('canvas');
+    await QRCode.toCanvas(qr, paynowPayload({ mobile: o.mobile, amount: e.amount, ref: 'WeSplit ' + e.name }), { margin: 1, width: 480, color: { dark: '#7c1a78' } });
+    c.drawImage(qr, (W - 480) / 2, y + 190, 480, 480);
+    c.font = `600 28px ${F}`; c.fillStyle = '#7c1a78'; c.fillText(fit(c, `PayNow to ${o.payer}`, W - 4 * PAD), W / 2, y + 725);
+    c.font = `500 24px ${F}`; c.fillStyle = '#6b7280'; c.fillText(normalizeMobile(o.mobile) || '', W / 2, y + 765);
+    c.fillText('Scan with any SG banking app', W / 2, y + 805);
+    c.textAlign = 'left';
+    y += CH + 30;
+  }
+  c.font = `500 20px ${F}`; c.fillStyle = '#9ca3af'; c.textAlign = 'center'; c.fillText('wesplit-sg.vercel.app', W / 2, cv.height - 28);
+  return new Promise((r) => cv.toBlob((b) => r(b!), 'image/png'));
+}
+
+function canShareFiles(f: File) { try { return !!navigator.canShare?.({ files: [f] }); } catch { return false; } }
+
+function ShareRow({ make, text, file }: { make: () => Promise<Blob>; text: string; file: string }) {
+  const [fallback, setFallback] = useState(false);
+  const [busy, setBusy] = useState(false);
+  async function share() {
+    setBusy(true);
+    try {
+      const f = new File([await make()], file, { type: 'image/png' });
+      if (canShareFiles(f)) await navigator.share({ files: [f], text });
+      else setFallback(true);
+    } catch (e) { if ((e as Error).name !== 'AbortError') setFallback(true); }
+    finally { setBusy(false); }
+  }
+  async function download() {
+    const u = URL.createObjectURL(await make());
+    const a = document.createElement('a'); a.href = u; a.download = file; a.click();
+    setTimeout(() => URL.revokeObjectURL(u), 5000);
+  }
+  return (
+    <div className="share">
+      <button className="ghost sm" disabled={busy} onClick={share} aria-label="Share">⤴ Share</button>
+      {fallback && <>
+        <a className="ghost sm wa" href={waLink(text)} target="_blank" rel="noopener">WhatsApp</a>
+        <a className="ghost sm tg" href={tgLink(text)} target="_blank" rel="noopener">Telegram</a>
+        <button className="ghost sm" onClick={download} aria-label="Download QR">⬇ QR</button>
+      </>}
+    </div>
+  );
+}
+
+function PayQR({ mobile, amount, who, payer, place }: { mobile: string; amount: number; who: string; payer: string; place: string }) {
   const [src, setSrc] = useState('');
   const [show, setShow] = useState(false);
   useEffect(() => {
     if (!show) return;
     QRCode.toDataURL(paynowPayload({ mobile, amount, ref: 'WeSplit ' + who }), { margin: 1, width: 240, color: { dark: '#7c1a78' } }).then(setSrc);
   }, [show, mobile, amount, who]);
-  return show ? (
-    <div className="qr" onClick={() => setShow(false)}>
-      {src && <img src={src} alt={`PayNow QR for ${money(amount)}`} />}
-      <small>Scan with any SG banking app · {money(amount)}</small>
+  const text = shareText(who, place, amount, payer, mobile);
+  return (
+    <>
+      {show ? (
+        <div className="qr" onClick={() => setShow(false)}>
+          {src && <img src={src} alt={`PayNow QR for ${money(amount)}`} />}
+          <small>Scan with any SG banking app · {money(amount)}</small>
+        </div>
+      ) : <button className="ghost sm paynow" onClick={() => setShow(true)}>Show PayNow QR</button>}
+      <ShareRow make={() => makeCard([{ name: who, amount }], { mobile, payer, place })} text={text} file={`WeSplit-${safe(who)}.png`} />
+    </>
+  );
+}
+
+function ShareAll({ list, mobile, payer, place, summary }: { list: Entry[]; mobile: string; payer: string; place: string; summary: string }) {
+  if (list.length < 2) return null;
+  return (
+    <div className="card shareall">
+      <div className="orow"><b>Share with the group</b></div>
+      <ShareRow make={() => makeCard(list, { mobile, payer, place })} text={summary} file="WeSplit-all.png" />
     </div>
-  ) : <button className="ghost sm paynow" onClick={() => setShow(true)}>Show PayNow QR</button>;
+  );
 }
