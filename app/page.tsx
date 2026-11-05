@@ -523,14 +523,7 @@ function AssignStep({ bill, up, notify, next, detected, total, shares, bd }: { b
               <label className="field grow"><span>Item</span><input value={sheetItem.name} onChange={(e) => up((b) => { b.items.find((x) => x.id === sheetItem.id)!.name = e.target.value; return b; })} /></label>
               <label className="field price-f"><span>Price</span><input className="num" inputMode="decimal" defaultValue={sheetItem.price.toFixed(2)} onBlur={(e) => { const v = parseFloat(e.target.value); up((b) => { b.items.find((x) => x.id === sheetItem.id)!.price = isNaN(v) ? 0 : Math.round(v * 100) / 100; return b; }); e.target.value = (isNaN(v) ? 0 : v).toFixed(2); }} /></label>
             </div>
-            <label className="field"><span>Assign to</span>
-              <select value="" onChange={(e) => e.target.value && toggle(sheetItem.id, e.target.value)}>
-                <option value="">Choose a person…</option>
-                <option value="*">Everyone, split evenly</option>
-                {bill.people.map((p) => <option key={p.id} value={p.id}>{bill.assign[sheetItem.id]?.[p.id] ? '✓ ' : ''}{p.name}</option>)}
-              </select>
-            </label>
-            <div className="sub">Shares</div>
+            <div className="sub">Who had this? Tap + for a bigger share</div>
             {bill.people.map((p) => {
               const w = bill.assign[sheetItem.id]?.[p.id] || 0;
               return (
@@ -623,7 +616,7 @@ function SettleStep({ bill, notify, shares, total, payee, setPayee, saveRec, bd 
         {owing.map((p) => (
           <li key={p.id} className="owe" style={{ ['--pc' as string]: p.color }}>
             <div className="line"><span className="row gap12"><Avatar p={p} size={44} /><b>{p.name}</b></span><b className="num big">{money(shares[p.id])}</b></div>
-            <PayQR mobile={payee.mobile} amount={shares[p.id]} who={p.name} payTo={payTo} place={place} />
+            <PayQR mobile={payee.mobile} amount={shares[p.id]} who={p.name} payTo={payTo} place={place} notify={notify} />
           </li>
         ))}
       </ul>
@@ -631,8 +624,9 @@ function SettleStep({ bill, notify, shares, total, payee, setPayee, saveRec, bd 
       {shares._ > 0 && <p className="note warn center"><span className="num">{money(shares._)}</span> is still unassigned.</p>}
       {owing.length > 1 && (
         <div className="group-share">
-          <span className="row gap8"><Users size={18} /> Send to the group</span>
-          <ShareRow make={() => makeCard(owing.map((p) => ({ name: p.name, amount: shares[p.id] })), { mobile: payee.mobile, payTo, place })} text={summary} file="WeSplit-group.png" />
+          <b className="row gap8"><Users size={18} /> Share the split with everyone</b>
+          <p className="small muted">Sends each person&apos;s amount and a PayNow QR they can scan.</p>
+          <ShareRow make={() => makeCard(owing.map((p) => ({ name: p.name, amount: shares[p.id] })), { mobile: payee.mobile, payTo, place })} text={summary} file="WeSplit-group.png" sig={sig} notify={notify} label="Share with the group" alwaysOpen />
         </div>
       )}
       <button className="btn primary" onClick={async () => { try { await navigator.clipboard.writeText(summary); notify({ msg: 'Summary copied' }); } catch { notify({ msg: "Couldn't copy. Try again." }); } }}><Copy size={18} /> Copy summary</button>
@@ -695,36 +689,59 @@ async function makeCard(list: Entry[], o: { mobile: string; payTo: string; place
 
 function canShareFiles(f: File) { try { return !!navigator.canShare?.({ files: [f] }); } catch { return false; } }
 
-function ShareRow({ make, text, file }: { make: () => Promise<Blob>; text: string; file: string }) {
-  const [fallback, setFallback] = useState(false);
+function ShareRow({ make, text, file, sig, notify, label = 'Share', alwaysOpen = false }: { make: () => Promise<Blob>; text: string; file: string; sig: string; notify: (t: Toast) => void; label?: string; alwaysOpen?: boolean }) {
+  // Prefetch the PNG so the tap can call navigator.share without awaiting work first.
+  // iOS Safari drops the user-gesture if we await QR/canvas generation between the tap and share().
+  const [fileReady, setFileReady] = useState<File | null>(null);
+  const [open, setOpen] = useState(alwaysOpen);
   const [busy, setBusy] = useState(false);
+  const gen = useRef(0);
+  useEffect(() => {
+    const n = ++gen.current; setFileReady(null);
+    make().then((b) => { if (gen.current === n) setFileReady(new File([b], file, { type: 'image/png' })); }).catch(() => {});
+  }, [sig]); // eslint-disable-line react-hooks/exhaustive-deps
   async function share() {
+    const tryNative = async (f: File | null) => {
+      if (typeof navigator.share !== 'function') return false;
+      try {
+        if (f && canShareFiles(f)) { await navigator.share({ files: [f], text }); return true; }
+        await navigator.share({ text }); return true;
+      } catch (e) { if ((e as Error).name === 'AbortError') return true; return false; }
+    };
+    if (fileReady) { if (await tryNative(fileReady)) return; setOpen(true); return; }
     setBusy(true);
     try {
-      const f = new File([await make()], file, { type: 'image/png' });
-      if (canShareFiles(f)) await navigator.share({ files: [f], text });
-      else setFallback(true);
-    } catch (e) { if ((e as Error).name !== 'AbortError') setFallback(true); }
-    finally { setBusy(false); }
+      const built = new File([await make()], file, { type: 'image/png' });
+      setFileReady(built);
+      if (await tryNative(built)) { setBusy(false); return; }
+    } catch { notify({ msg: "Couldn't build the share image. Try WhatsApp or Save image." }); }
+    setBusy(false); setOpen(true);
   }
   async function download() {
-    const u = URL.createObjectURL(await make());
-    const a = document.createElement('a'); a.href = u; a.download = file; a.click();
-    setTimeout(() => URL.revokeObjectURL(u), 5000);
+    try {
+      const b = fileReady || new File([await make()], file, { type: 'image/png' });
+      const u = URL.createObjectURL(b); const a = document.createElement('a'); a.href = u; a.download = file; a.click();
+      setTimeout(() => URL.revokeObjectURL(u), 5000); notify({ msg: 'Image saved' });
+    } catch { notify({ msg: "Couldn't save the image." }); }
+  }
+  async function copy() {
+    try { await navigator.clipboard.writeText(text); notify({ msg: 'Message copied' }); }
+    catch { notify({ msg: "Couldn't copy. Try WhatsApp instead." }); }
   }
   return (
     <div className="share">
-      <button className="chip-btn" disabled={busy} onClick={share} aria-label="Share"><Share2 size={16} /> Share</button>
-      {fallback && <>
+      <button className="chip-btn" disabled={busy} onClick={share} aria-label={label}><Share2 size={16} /> {busy ? 'Preparing…' : label}</button>
+      {open && <>
         <a className="chip-btn" href={waLink(text)} target="_blank" rel="noopener" aria-label="Send on WhatsApp"><MessageCircle size={16} /> WhatsApp</a>
         <a className="chip-btn" href={tgLink(text)} target="_blank" rel="noopener" aria-label="Send on Telegram"><Send size={16} /> Telegram</a>
-        <button className="chip-btn" onClick={download} aria-label="Download QR"><Download size={16} /> Save image</button>
+        <button className="chip-btn" onClick={copy} aria-label="Copy message"><Copy size={16} /> Copy</button>
+        <button className="chip-btn" onClick={download} aria-label="Save image" disabled={!fileReady && busy}><Download size={16} /> Save image</button>
       </>}
     </div>
   );
 }
 
-function PayQR({ mobile, amount, who, payTo, place }: { mobile: string; amount: number; who: string; payTo: string; place: string }) {
+function PayQR({ mobile, amount, who, payTo, place, notify }: { mobile: string; amount: number; who: string; payTo: string; place: string; notify: (t: Toast) => void }) {
   const [src, setSrc] = useState('');
   const [show, setShow] = useState(false);
   useEffect(() => {
@@ -741,7 +758,7 @@ function PayQR({ mobile, amount, who, payTo, place }: { mobile: string; amount: 
       )}
       <div className="share">
         {!show && <button className="chip-btn" onClick={() => setShow(true)}><QrCode size={16} /> Show QR</button>}
-        <ShareRow make={() => makeCard([{ name: who, amount }], { mobile, payTo, place })} text={shareText(who, place, amount, payTo, mobile)} file={`WeSplit-${safe(who)}.png`} />
+        <ShareRow make={() => makeCard([{ name: who, amount }], { mobile, payTo, place })} text={shareText(who, place, amount, payTo, mobile)} file={`WeSplit-${safe(who)}.png`} sig={`${who}|${amount}|${mobile}`} notify={notify} />
       </div>
     </>
   );
@@ -827,7 +844,7 @@ function BillDetail({ rec, setHistory, notify, close, user }: { rec?: Rec; setHi
             <div className="line"><span className="row gap12"><Avatar p={p} size={44} /><b>{p.name}</b></span><b className="num big">{money(p.share)}</b></div>
             <div className="share">
               <button className={'chip-btn paid-btn' + (p.paid ? ' on' : '')} aria-pressed={p.paid} onClick={() => toggle(p.id)}>{p.paid ? <CircleCheck size={16} /> : <Circle size={16} />} {p.paid ? 'Paid' : 'Mark as paid'}</button>
-              {!p.paid && <NudgeRow rec={rec} who={p.name} amount={p.share} payTo={payTo} ensure={ensureLink} />}
+              {!p.paid && <NudgeRow rec={rec} who={p.name} amount={p.share} payTo={payTo} ensure={ensureLink} notify={notify} />}
             </div>
           </li>
         ))}
@@ -990,8 +1007,8 @@ function FriendsView({ history, friends, setHistory, notify, payee, open }: { hi
                 </div>
                 : <div className="confirm"><p>Mark <b>{b.bills.length} bill{b.bills.length > 1 ? 's' : ''}</b> ({money(b.total)}) as paid by {b.name}?</p><div className="row gap8"><button className="btn ghost" onClick={() => setSure(false)}>Not yet</button><button className="btn primary" style={{ flex: 1 }} onClick={() => settleAll(b)}>Settle all</button></div></div>}
               {nudge && !sure && <div className="combo">
-                <PayQR mobile={payee.mobile} amount={b.total} who={b.name} payTo={payTo} place={b.bills.length > 1 ? `${b.bills.length} bills` : b.bills[0].rec.place} />
-                <TextShare text={`Hey ${b.name}! Friendly nudge 🙏 You owe ${payTo} ${money(b.total)} in total for ${b.bills.map((e) => `${e.rec.place} (${money(e.amount)})`).join(', ')}. PayNow ${fmtSG(payee.mobile)}. Thanks!`} url={b.bills.find((e) => e.rec.share)?.rec.share ? shareUrl(b.bills.find((e) => e.rec.share)!.rec.share!.id) : APP_URL} label="More" />
+                <PayQR mobile={payee.mobile} amount={b.total} who={b.name} payTo={payTo} place={b.bills.length > 1 ? `${b.bills.length} bills` : b.bills[0].rec.place} notify={notify} />
+                <TextShare text={`Hey ${b.name}! Friendly nudge 🙏 You owe ${payTo} ${money(b.total)} in total for ${b.bills.map((e) => `${e.rec.place} (${money(e.amount)})`).join(', ')}. PayNow ${fmtSG(payee.mobile)}. Thanks!`} url={b.bills.find((e) => e.rec.share)?.rec.share ? shareUrl(b.bills.find((e) => e.rec.share)!.rec.share!.id) : APP_URL} label="More" notify={notify} />
               </div>}
             </div>}
           </li>
@@ -1002,14 +1019,15 @@ function FriendsView({ history, friends, setHistory, notify, payee, open }: { hi
   );
 }
 
-function TextShare({ text, url, label = 'Share' }: { text: string; url: string; label?: string }) {
-  const native = typeof navigator !== 'undefined' && !!navigator.share;
-  const full = text + ' ' + url;
+function TextShare({ text, url, label = 'Share', notify }: { text: string; url: string; label?: string; notify?: (t: Toast) => void }) {
+  const full = text + (url ? ' ' + url : '');
+  const native = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
   return (
     <div className="share">
       <a className="chip-btn" href={'https://wa.me/?text=' + encodeURIComponent(full)} target="_blank" rel="noopener" aria-label="Send on WhatsApp"><MessageCircle size={16} /> WhatsApp</a>
-      <a className="chip-btn" href={'https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(text)} target="_blank" rel="noopener" aria-label="Send on Telegram"><Send size={16} /> Telegram</a>
-      {native && <button className="chip-btn" onClick={() => navigator.share({ text, url }).catch(() => {})}><Share2 size={16} /> {label}</button>}
+      <a className="chip-btn" href={'https://t.me/share/url?url=' + encodeURIComponent(url || APP_URL) + '&text=' + encodeURIComponent(text)} target="_blank" rel="noopener" aria-label="Send on Telegram"><Send size={16} /> Telegram</a>
+      {native && <button className="chip-btn" onClick={() => { navigator.share({ text, url: url || undefined }).catch((e) => { if ((e as Error).name !== 'AbortError') notify?.({ msg: "Couldn't open Share. Try WhatsApp." }); }); }}><Share2 size={16} /> {label}</button>}
+      <button className="chip-btn" onClick={async () => { try { await navigator.clipboard.writeText(full); notify?.({ msg: 'Message copied' }); } catch { notify?.({ msg: "Couldn't copy." }); } }}><Copy size={16} /> Copy</button>
     </div>
   );
 }
@@ -1027,7 +1045,7 @@ function ShareLink({ rec, ensure, revoke, notify }: { rec: Rec; ensure: () => Pr
       <b><Link2 size={16} /> Anyone with this link can see the bill</b>
       <span className="url">{url.replace(/^https?:\/\//, '')}</span>
       <small className="muted">Friends tap their name to see their share and your PayNow QR. Paid status updates automatically.</small>
-      <TextShare text={`${host}Here's the split for ${rec.place} (${money(rec.total)}). Tap your name to see what you owe:`} url={url} />
+      <TextShare text={`${host}Here's the split for ${rec.place} (${money(rec.total)}). Tap your name to see what you owe:`} url={url} notify={notify} />
       <div className="share">
         <button className="chip-btn" onClick={async () => { await navigator.clipboard.writeText(url).catch(() => {}); notify({ msg: 'Link copied' }); }}><Copy size={16} /> Copy link</button>
         {!sure ? <button className="chip-btn danger" onClick={() => setSure(true)}><Link2Off size={16} /> Stop sharing</button>
@@ -1037,12 +1055,12 @@ function ShareLink({ rec, ensure, revoke, notify }: { rec: Rec; ensure: () => Pr
   );
 }
 
-function NudgeRow({ rec, who, amount, payTo, ensure }: { rec: Rec; who: string; amount: number; payTo: string; ensure: () => Promise<string | null> }) {
+function NudgeRow({ rec, who, amount, payTo, ensure, notify }: { rec: Rec; who: string; amount: number; payTo: string; ensure: () => Promise<string | null>; notify: (t: Toast) => void }) {
   const [url, setUrl] = useState<string | null>(rec.share ? shareUrl(rec.share.id) : null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   if (!open) return <button className="chip-btn" disabled={busy} onClick={async () => { setBusy(true); const u = await ensure(); setBusy(false); if (u) { setUrl(u); setOpen(true); } }}><Bell size={16} /> {busy ? 'Nudge…' : 'Nudge'}</button>;
   const saved = rec.breakdown && rec.breakdown.itemDisc + (rec.breakdown.receiptDisc || 0) + rec.breakdown.voucher > 0 ? ' (after discounts)' : '';
   const text = `Hey ${who}! Gentle nudge for ${rec.place} 🙏 Your share is ${money(amount)}${saved}. PayNow ${payTo === fmtSG(rec.payee.mobile) ? fmtSG(rec.payee.mobile) : `${payTo} (${fmtSG(rec.payee.mobile)})`} or tap your name here for the QR:`;
-  return <TextShare text={text} url={url!} label="More" />;
+  return <TextShare text={text} url={url!} label="More" notify={notify} />;
 }
