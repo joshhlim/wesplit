@@ -2,7 +2,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { Camera, ChevronLeft, Plus, Minus, X, Check, Ellipsis, Sun, Moon, Share2, Download, Copy, Trash2, Lock, Receipt, CircleAlert, RotateCcw, MessageCircle, Send, PenLine, WifiOff, ArrowRight, QrCode, Users } from 'lucide-react';
-import { MODES, detectMode, split, itemsSum, paynowPayload, normalizeMobile } from '@/lib/split.mjs';
+import { MODES, detectMode, split, paynowPayload, normalizeMobile, itemNetCents } from '@/lib/split.mjs';
+import { putPhoto, compress, getPhoto, delLocal, moveLocal, removeCloud, removeAllCloud } from '@/lib/photos';
+import { MapPin, Image as ImageIc, Tag, Percent, Gift, HandCoins } from 'lucide-react';
 import { Mark } from '@/components/brand';
 import { History as HistoryIc, CircleCheck, Circle, Bell, UserRound, Mail, LogOut, Cloud, CloudOff } from 'lucide-react';
 import { supa } from '@/lib/supabase';
@@ -11,15 +13,17 @@ import { createShare, updateShare, revokeShare, shareUrl, snapshotOf, type Share
 import { Link2, Link2Off } from 'lucide-react';
 import type { User } from '@supabase/supabase-js';
 
-type Rec = { updatedAt?: number; items?: { name: string; qty: number | null; price: number; who: string[] }[]; share?: ShareRef; id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; people: { id: string; name: string; color: string; share: number; paid: boolean }[] };
+type Voucher = { kind: 'pct' | 'amt'; value: number };
+type BD = { gross: number; itemDisc: number; voucher: number; sub: number; sc: number; gst: number; total: number };
+type Rec = { updatedAt?: number; items?: { name: string; qty: number | null; price: number; disc?: number; free?: boolean; w?: Record<string, number>; who: string[] }[]; share?: ShareRef; voucher?: string; breakdown?: BD; location?: string; photo?: boolean; edited?: boolean; id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; people: { id: string; name: string; color: string; share: number; paid: boolean }[] };
 type Friend = { name: string; color: string; count: number };
 const load = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } };
 
-type Item = { id: string; name: string; qty: number | null; price: number };
+type Item = { id: string; name: string; qty: number | null; price: number; disc?: number; free?: boolean };
 type Person = { id: string; name: string; color: string };
 type Assign = Record<string, Record<string, number>>;
 type Mode = keyof typeof MODES;
-type Bill = { id?: string; merchant: string | null; total: number | null; items: Item[]; people: Person[]; assign: Assign; mode: Mode; payer: string };
+type Bill = { id?: string; merchant: string | null; total: number | null; items: Item[]; people: Person[]; assign: Assign; mode: Mode; payer: string; voucher?: Voucher; photo?: boolean; location?: string };
 type Up = (f: (b: Bill) => Bill) => void;
 type Toast = { msg: string; undo?: () => void } | null;
 
@@ -69,6 +73,7 @@ export default function Home() {
   const [friends, setFriends] = useState<Friend[]>([]);
   const [view, setView] = useState<null | 'history' | string>(null);
   const tt = useRef(0);
+  const back = useRef<'history' | 'friends'>('history');
   const [user, setUser] = useState<User | null>(null);
   const [acct, setAcct] = useState(false);
   const [sync, setSync] = useState<'idle' | 'busy' | 'ok' | 'off' | 'err'>('idle');
@@ -145,7 +150,7 @@ export default function Home() {
         for (const p of r.people.slice(1)) { const f = out.find((x) => x.name.toLowerCase() === p.name.trim().toLowerCase()); if (f) { f.count++; f.color = p.color; } else if (p.name.trim() && !/^Friend \d+$/.test(p.name)) out.push({ name: p.name.trim(), color: p.color, count: 1 }); }
         return out;
       });
-      const merged = { ...r, share: old?.share, date: old?.date || r.date, updatedAt: Date.now(), people: r.people.map((p) => ({ ...p, paid: old?.people.find((q) => q.id === p.id)?.paid || false })) };
+      const merged = { ...r, share: old?.share, edited: old?.edited, place: old?.edited ? old.place : r.place, location: old?.edited ? old.location : r.location, date: old?.date || r.date, updatedAt: Date.now(), people: r.people.map((p) => ({ ...p, paid: old?.people.find((q) => q.id === p.id)?.paid || false })) };
       return [merged, ...h.filter((x) => x.id !== r.id)];
     });
   }, []);
@@ -161,6 +166,7 @@ export default function Home() {
     setBusy(true);
     try {
       const img = await shrink(file);
+      const pid = bill.id!; compress(file).then((b) => putPhoto(pid, b)).then(() => up((x) => (x.id === pid ? { ...x, photo: true } : x))).catch(() => {});
       const fd = new FormData(); fd.append('image', img, 'receipt.jpg'); fd.append('pow', await proofOfWork(img.size));
       const r = await fetch('/api/scan', { method: 'POST', body: fd });
       const d = await r.json().catch(() => ({ error: 'Something went wrong. Please try again.' }));
@@ -169,7 +175,7 @@ export default function Home() {
       const items: Item[] = d.items.map((i: { name: string; qty: number | null; price: number }) => ({ id: uid(), name: i.name, qty: i.qty, price: i.price }));
       up((b) => {
         const auto = detectMode(items, d.total) as Mode | null;
-        return { ...b, merchant: d.merchant, total: d.total, items, assign: {}, mode: auto || (d.gst ? (d.serviceCharge ? 'sg' : 'gst') : 'sg') };
+        return { ...b, voucher: undefined, merchant: d.merchant, total: d.total, items, assign: {}, mode: auto || (d.gst ? (d.serviceCharge ? 'sg' : 'gst') : 'sg') };
       });
       go(1);
     } catch (e) {
@@ -183,14 +189,14 @@ export default function Home() {
     notify({ msg: 'Started a new bill', undo: () => { setBill(prev.bill); setStep(prev.step); } });
   };
 
-  const result = useMemo(() => split(bill.items, bill.people, bill.assign, bill.mode, bill.total), [bill]);
-  const detected = detectMode(bill.items, bill.total);
+  const result = useMemo(() => split(bill.items, bill.people, bill.assign, bill.mode, bill.total, bill.voucher), [bill]);
+  const detected = detectMode(bill.items, bill.total, bill.voucher);
   const can = (i: number) => i === 0 || bill.items.length > 0;
 
   return (
     <main className={step === 2 ? 'has-bar' : ''}>
       <header className="top">
-        {view ? <button className="icon-btn" aria-label="Back" onClick={() => setView(view === 'history' ? null : 'history')}><ChevronLeft size={22} /></button>
+        {view ? <button className="icon-btn" aria-label="Back" onClick={() => setView(view === 'history' || view === 'friends' ? null : back.current)}><ChevronLeft size={22} /></button>
           : step > 0 ? <button className="icon-btn" aria-label="Back" onClick={() => go(step - 1)}><ChevronLeft size={22} /></button>
           : <span className="brand"><Mark size={28} />{!toast && <b>WeSplit</b>}</span>}
         {toast ? (
@@ -198,16 +204,17 @@ export default function Home() {
             <span>{toast.msg}</span>
             {toast.undo && <button onClick={() => { toast.undo!(); notify(null); }}>Undo</button>}
           </div>
-        ) : (view || step > 0) && <span className="title">{view ? 'History' : STEPS[step]}</span>}
+        ) : (view || step > 0) && <span className="title">{view === 'friends' ? 'Friends' : view ? (back.current === 'friends' && view !== 'history' ? 'Bill' : 'History') : STEPS[step]}</span>}
         <div className="row gap4">
           {loaded && supa() && <button className={'icon-btn acct' + (user ? ' in' : '')} aria-label={user ? 'Account' : 'Sign in'} onClick={() => setAcct(true)}>{user ? (user.email || '?')[0].toUpperCase() : <UserRound size={18} />}</button>}
           {!view && bill.items.length > 0 && <button className="icon-btn" aria-label="New bill" onClick={newBill}><RotateCcw size={18} /></button>}
           <button className="icon-btn" aria-label={theme === 'dark' ? 'Light mode' : 'Dark mode'} onClick={toggleTheme}>{theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}</button>
         </div>
       </header>
-      {view ? <div className="screen fwd">{view === 'history'
-        ? <HistoryList history={history} open={(id) => setView(id)} />
-        : <BillDetail rec={history.find((r) => r.id === view)} setHistory={setHistory} notify={notify} close={() => setView('history')} />}</div> : <>
+      {view ? <div key={view} className="screen fwd">{view === 'history'
+        ? <HistoryList history={history} open={(id) => { back.current = 'history'; setView(id); }} />
+        : view === 'friends' ? <FriendsView history={history} friends={friends} setHistory={setHistory} notify={notify} payee={payee} open={(id) => { back.current = 'friends'; setView(id); }} />
+        : <BillDetail rec={history.find((r) => r.id === view)} setHistory={setHistory} notify={notify} close={() => setView(back.current)} user={user} />}</div> : <>
       <nav className="steps" aria-label="Steps">
         {STEPS.map((s, i) => (
           <button key={s} className={'step' + (i === step ? ' on' : '') + (i < step ? ' done' : '')} disabled={!can(i)} aria-current={i === step ? 'step' : undefined} onClick={() => go(i)}>
@@ -217,11 +224,11 @@ export default function Home() {
       </nav>
 
       <div key={step} className={'screen ' + (dir > 0 ? 'fwd' : 'back')}>
-        {step === 0 && <ScanStep busy={busy} err={err} onFile={scan} hasBill={bill.items.length > 0} resume={() => go(2)} openHistory={() => setView('history')} owed={history.reduce((s, r) => s + r.people.slice(1).filter((p) => !p.paid).reduce((a, p) => a + Math.round(p.share * 100), 0), 0) / 100}
+        {step === 0 && <ScanStep busy={busy} err={err} onFile={scan} hasBill={bill.items.length > 0} resume={() => go(2)} openHistory={() => setView('history')} openFriends={() => setView('friends')} owed={history.reduce((s, r) => s + r.people.slice(1).filter((p) => !p.paid).reduce((a, p) => a + Math.round(p.share * 100), 0), 0) / 100}
           onManual={() => { up((b) => ({ ...b, merchant: null, total: null, assign: {}, items: [{ id: uid(), name: 'Item 1', qty: 1, price: 0 }] })); go(1); }} />}
         {step === 1 && <PeopleStep bill={bill} up={up} notify={notify} next={() => go(2)} friends={friends} setFriends={setFriends} />}
-        {step === 2 && <AssignStep bill={bill} up={up} notify={notify} next={() => go(3)} detected={detected} total={result.total} shares={result.shares} />}
-        {step === 3 && <SettleStep bill={bill} notify={notify} shares={result.shares} total={result.total} payee={payee} setPayee={setPayee} saveRec={saveRec} />}
+        {step === 2 && <AssignStep bill={bill} up={up} notify={notify} next={() => go(3)} detected={detected} total={result.total} shares={result.shares} bd={result.breakdown} />}
+        {step === 3 && <SettleStep bill={bill} notify={notify} shares={result.shares} total={result.total} payee={payee} setPayee={setPayee} saveRec={saveRec} bd={result.breakdown} />}
       </div></>}
 
       <footer className="foot">
@@ -262,6 +269,7 @@ function AccountSheet({ user, sync, close, notify }: { user: User | null; sync: 
     notify({ msg: 'Deleting your account…', undo: () => { undone = true; } });
     setTimeout(async () => {
       if (undone) return;
+      if (user) await removeAllCloud(user.id).catch(() => {});
       const { error } = await sb.rpc('delete_my_account');
       if (error) { notify({ msg: "Couldn't delete your account. Try again." }); return; }
       await sb.auth.signOut();
@@ -322,7 +330,7 @@ function Stepper({ value, set, min = 0, max = 20, label }: { value: number; set:
 }
 
 /* ---------- 1. Scan ---------- */
-function ScanStep({ busy, err, onFile, onManual, hasBill, resume, openHistory, owed }: { busy: boolean; err: string; onFile: (f: File) => void; onManual: () => void; hasBill: boolean; resume: () => void; openHistory: () => void; owed: number }) {
+function ScanStep({ busy, err, onFile, onManual, hasBill, resume, openHistory, owed, openFriends }: { busy: boolean; err: string; onFile: (f: File) => void; onManual: () => void; hasBill: boolean; resume: () => void; openHistory: () => void; owed: number; openFriends: () => void }) {
   const ref = useRef<HTMLInputElement>(null);
   if (busy) return (
     <section className="stack">
@@ -352,6 +360,7 @@ function ScanStep({ busy, err, onFile, onManual, hasBill, resume, openHistory, o
       <button className="btn ghost" onClick={onManual}><PenLine size={18} /> Enter items yourself</button>
       {hasBill && <button className="btn ghost" onClick={resume}>Continue current bill <ArrowRight size={18} /></button>}
       <button className="btn ghost" onClick={openHistory}><HistoryIc size={18} /> History{owed > 0 && <span className="pill-num num">{money(owed)} owed</span>}</button>
+      <button className="btn ghost" onClick={openFriends}><HandCoins size={18} /> Friends &amp; balances</button>
     </section>
   );
 }
@@ -400,7 +409,7 @@ function PeopleStep({ bill, up, notify, next, friends, setFriends }: { bill: Bil
 }
 
 /* ---------- 3. Assign ---------- */
-function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill: Bill; up: Up; notify: (t: Toast) => void; next: () => void; detected: string | null; total: number; shares: Record<string, number> }) {
+function AssignStep({ bill, up, notify, next, detected, total, shares, bd }: { bill: Bill; up: Up; notify: (t: Toast) => void; next: () => void; detected: string | null; total: number; shares: Record<string, number>; bd: BD }) {
   const [sheet, setSheet] = useState<string | null>(null);
   const [focus, setFocus] = useState<string | null>(null);
   const press = useRef<{ t: number; x: number; y: number } | null>(null);
@@ -426,7 +435,6 @@ function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill:
   };
 
   const done = bill.items.filter((it) => Object.values(bill.assign[it.id] || {}).some((w) => w > 0)).length;
-  const sum = itemsSum(bill.items);
   const sheetItem = sheet ? bill.items.find((i) => i.id === sheet) : null;
   const left = bill.items.length - done;
   const prevLeft = useRef(left);
@@ -458,7 +466,7 @@ function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill:
               <span className="strip" aria-hidden="true">{who.map((p) => <i key={p.id} style={{ background: p.color, flex: a[p.id] }} />)}</span>
               <div className="rhead">
                 <span className="rname">{it.qty && it.qty > 1 ? <span className="qty num">{it.qty}×</span> : null}{it.name}</span>
-                <span className="price num">{money(it.price)}</span>
+                <span className="price num">{it.free ? <><s>{money(it.price)}</s> <em className="freetag">Free</em></> : it.disc ? <><s>{money(it.price)}</s> {money(itemNetCents(it) / 100)}</> : money(it.price)}</span>
                 <button className="icon-btn sm" aria-label={`Edit ${it.name}`} onClick={() => setSheet(it.id)}><Ellipsis size={18} /></button>
               </div>
               <div className={'bubbles' + (bill.people.length >= 7 ? ' scroll' : '')} role="group" aria-label={`Who had ${it.name}?`}>
@@ -480,13 +488,17 @@ function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill:
       <button className="btn ghost" onClick={addItem}><Plus size={18} /> Add item</button>
 
       <div className="soft">
-        <div className="line"><span>Items</span><b className="num">{money(sum)}</b></div>
+        <div className="line"><span>Items</span><b className="num">{money(bd.gross / 100)}</b></div>
+        {bd.itemDisc > 0 && <div className="line disc"><span>Item discounts</span><b className="num">−{money(bd.itemDisc / 100)}</b></div>}
+        <VoucherPicker v={bill.voucher} set={(v) => up((b) => ({ ...b, voucher: v }))} off={bd.voucher} />
         <div className="line">
           <span>Charges</span>
           <select value={bill.mode} aria-label="Charges" onChange={(e) => up((b) => ({ ...b, mode: e.target.value as Mode }))}>
             {Object.entries(MODES).map(([k, m]) => <option key={k} value={k}>{m.label}{detected === k ? ' (detected)' : ''}</option>)}
           </select>
         </div>
+        {bd.sc > 0 && <div className="line muted"><span>Service charge 10%</span><span className="num">{money(bd.sc / 100)}</span></div>}
+        {bd.gst > 0 && <div className="line muted"><span>GST 9%</span><span className="num">{money(bd.gst / 100)}</span></div>}
         <div className="line total"><span>Total</span><b className="num">{money(total)}</b></div>
         {bill.total != null && Math.abs(bill.total - total) > 0.01 && <p className="note warn">The receipt says {money(bill.total)}. Check the items or charges.</p>}
         {shares._ > 0 && <p className="note warn"><span className="num">{money(shares._)}</span> still needs an owner.</p>}
@@ -527,7 +539,17 @@ function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill:
                 </div>
               );
             })}
-            <p className="small muted">2 shares pays twice as much as 1.</p>
+            <div className="share">
+              <button className="chip-btn" onClick={() => { buzz(8); up((b) => { const a = (b.assign[sheetItem.id] ||= {}); const on = b.people.filter((p) => a[p.id] > 0); (on.length ? on : b.people).forEach((p) => (a[p.id] = 1)); return b; }); }}>Split evenly</button>
+            </div>
+            <PortionBar item={sheetItem} people={bill.people} a={bill.assign[sheetItem.id] || {}} />
+            <div className="sub">Discount</div>
+            <div className="share">
+              <button className={'chip-btn' + (sheetItem.free ? ' on' : '')} aria-pressed={!!sheetItem.free} onClick={() => { buzz(10); up((b) => { const x = b.items.find((i) => i.id === sheetItem.id)!; x.free = !x.free; return b; }); }}><Gift size={16} /> 1-for-1 · Free</button>
+              {[10, 20, 50].map((pc) => { const v = Math.round(sheetItem.price * pc) / 100; const on = !sheetItem.free && sheetItem.disc === v; return (
+                <button key={pc} className={'chip-btn' + (on ? ' on' : '')} aria-pressed={on} disabled={!!sheetItem.free} onClick={() => { buzz(8); up((b) => { const x = b.items.find((i) => i.id === sheetItem.id)!; x.disc = on ? 0 : v; return b; }); }}><Percent size={14} /> {pc}% off</button>); })}
+            </div>
+            {!sheetItem.free && <div className="line"><span>Amount off</span><MoneyStepper label="Amount off" value={sheetItem.disc || 0} max={sheetItem.price} set={(n) => up((b) => { b.items.find((x) => x.id === sheetItem.id)!.disc = n; return b; })} /></div>}
             <div className="row between">
               <button className="btn text danger" onClick={() => del(sheetItem.id)}><Trash2 size={18} /> Delete</button>
               <button className="btn primary compact" onClick={() => setSheet(null)}>Done</button>
@@ -569,11 +591,11 @@ function PayMe({ initial, onSave, onCancel }: { initial: Payee; onSave: (p: Paye
   );
 }
 
-function SettleStep({ bill, notify, shares, total, payee, setPayee, saveRec }: { bill: Bill; notify: (t: Toast) => void; shares: Record<string, number>; total: number; payee: Payee; setPayee: (p: Payee) => void; saveRec: (r: Rec) => void }) {
-  const sig = JSON.stringify([bill.id, bill.people, shares, total, payee, bill.merchant]);
+function SettleStep({ bill, notify, shares, total, payee, setPayee, saveRec, bd }: { bill: Bill; notify: (t: Toast) => void; shares: Record<string, number>; total: number; payee: Payee; setPayee: (p: Payee) => void; saveRec: (r: Rec) => void; bd: BD }) {
+  const sig = JSON.stringify([bill.id, bill.people, shares, total, payee, bill.merchant, bill.items, bill.voucher, bill.photo]);
   useEffect(() => {
     if (!normalizeMobile(payee.mobile) || !bill.id || bill.people.length < 2 || !bill.items.length) return;
-    saveRec({ id: bill.id, place: bill.merchant || 'Bill', date: new Date().toISOString(), total, mode: MODES[bill.mode as Mode].label, payee, items: bill.items.map((it) => ({ name: it.name, qty: it.qty, price: it.price, who: Object.keys(bill.assign[it.id] || {}).filter((k) => (bill.assign[it.id][k] || 0) > 0) })), people: bill.people.map((p) => ({ id: p.id, name: p.name, color: p.color, share: shares[p.id] || 0, paid: false })) });
+    saveRec({ id: bill.id, place: bill.merchant || 'Bill', date: new Date().toISOString(), total, mode: MODES[bill.mode as Mode].label, payee, photo: bill.photo, location: bill.location, voucher: vLabel(bill.voucher), breakdown: bd, items: bill.items.map((it) => { const w = Object.fromEntries(Object.entries(bill.assign[it.id] || {}).filter(([, v]) => v > 0)); return { name: it.name, qty: it.qty, price: it.price, disc: it.disc || undefined, free: it.free || undefined, w, who: Object.keys(w) }; }), people: bill.people.map((p) => ({ id: p.id, name: p.name, color: p.color, share: shares[p.id] || 0, paid: false })) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sig]);
   const [editing, setEditing] = useState(false);
@@ -763,13 +785,27 @@ function HistoryList({ history, open }: { history: Rec[]; open: (id: string) => 
   );
 }
 
-function BillDetail({ rec, setHistory, notify, close }: { rec?: Rec; setHistory: (f: (h: Rec[]) => Rec[]) => void; notify: (t: Toast) => void; close: () => void }) {
+function BillDetail({ rec, setHistory, notify, close, user }: { rec?: Rec; setHistory: (f: (h: Rec[]) => Rec[]) => void; notify: (t: Toast) => void; close: () => void; user: User | null }) {
+  const allPaidNow = !!rec && rec.people.slice(1).filter((p) => p.share > 0).every((p) => p.paid) && rec.people.slice(1).some((p) => p.share > 0);
+  const prevAll = useRef(allPaidNow);
+  const [party, setParty] = useState(0);
+  useEffect(() => { if (!prevAll.current && allPaidNow) { buzz(40); setParty((n) => n + 1); } prevAll.current = allPaidNow; }, [allPaidNow]);
+  const [photo, setPhoto] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   if (!rec) return <section className="stack"><div className="empty"><b>Bill not found</b></div></section>;
   const others = rec.people.slice(1).filter((p) => p.share > 0);
   const paid = others.filter((p) => p.paid).length;
   const payTo = rec.payee.name || fmtSG(rec.payee.mobile);
-  const toggle = (pid: string) => { buzz(12); setHistory((h) => h.map((r) => (r.id !== rec.id ? r : { ...r, updatedAt: Date.now(), people: r.people.map((p) => (p.id === pid ? { ...p, paid: !p.paid } : p)) }))); };
-  const del = () => { let snap: Rec[] = []; setHistory((h) => { snap = h; return h.filter((r) => r.id !== rec.id); }); close(); notify({ msg: 'Bill deleted', undo: () => setHistory(() => snap) }); };
+  const patch = (f: (r: Rec) => Rec) => setHistory((h) => h.map((r) => (r.id !== rec.id ? r : { ...f(r), updatedAt: Date.now() })));
+  const toggle = (pid: string) => { buzz(12); patch((r) => ({ ...r, people: r.people.map((p) => (p.id === pid ? { ...p, paid: !p.paid } : p)) })); };
+  const del = () => {
+    let snap: Rec[] = []; const id = rec.id;
+    setHistory((h) => { snap = h; return h.filter((r) => r.id !== id); }); close();
+    let undone = false;
+    notify({ msg: 'Bill deleted', undo: () => { undone = true; setHistory(() => snap); } });
+    setTimeout(() => { if (!undone) { delLocal(id); if (user) removeCloud(user.id, [id]).catch(() => {}); } }, 4600);
+  };
+  const addPhoto = async (f: File) => { try { await putPhoto(rec.id, await compress(f)); patch((r) => ({ ...r, photo: true })); notify({ msg: 'Receipt photo saved' }); } catch { notify({ msg: "Couldn't save that photo." }); } };
   const ensureLink = async (): Promise<string | null> => {
     if (rec.share) return shareUrl(rec.share.id);
     if (!navigator.onLine) { notify({ msg: 'Connect to the internet to make a link.' }); return null; }
@@ -780,13 +816,15 @@ function BillDetail({ rec, setHistory, notify, close }: { rec?: Rec; setHistory:
       return shareUrl(s.id);
     } catch (e) { notify({ msg: (e as Error).message }); return null; }
   };
+  const bd = rec.breakdown;
   return (
     <section className="stack">
-      {others.length > 0 && paid === others.length && <Celebrate colors={rec.people.map((p) => p.color)} />}
+      {party > 0 && <Confetti key={party} colors={rec.people.map((p) => p.color)} />}
       <div className="hero center">
-        <p className="muted">{rec.place} · {fmtDate(rec.date)}</p>
+        <PlaceTag rec={rec} save={(place, location) => patch((r) => ({ ...r, place, location, edited: true }))} />
         <h1 className="num huge">{money(owedOf(rec))}</h1>
-        <p className="muted small">{paid === others.length ? 'Everyone has paid' : `${paid} of ${others.length} paid`} · {money(rec.total)} total</p>
+        <p className="muted small">{fmtDate(rec.date)} · {paid === others.length ? 'Everyone has paid' : `${paid} of ${others.length} paid`} · {money(rec.total)} total</p>
+        {bd && (bd.itemDisc > 0 || bd.voucher > 0) && <p className="ok small"><Tag size={13} /> Saved {money((bd.itemDisc + bd.voucher) / 100)} with discounts{rec.voucher ? ` (${rec.voucher})` : ''}</p>}
       </div>
       <ul className="settle">
         {others.map((p) => (
@@ -803,7 +841,181 @@ function BillDetail({ rec, setHistory, notify, close }: { rec?: Rec; setHistory:
         try { await revokeShare(rec.share!); setHistory((h) => h.map((r) => (r.id === rec.id ? { ...r, share: undefined, updatedAt: Date.now() } : r))); notify({ msg: 'Link turned off' }); }
         catch { notify({ msg: "Couldn't turn off the link. Check your connection." }); }
       }} />
+      <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) addPhoto(f); e.target.value = ''; }} />
+      {rec.photo ? <button className="btn ghost" onClick={() => setPhoto(true)}><ImageIc size={18} /> View receipt photo</button>
+        : <button className="btn ghost" onClick={() => fileRef.current?.click()}><ImageIc size={18} /> Add receipt photo</button>}
+      <p className="fine center">Receipt photos stay private{user ? ' to your account' : ' on this phone'} and never appear on share links.</p>
       <button className="btn text danger" onClick={del}><Trash2 size={18} /> Delete bill</button>
+      {photo && <PhotoView id={rec.id} uid={user?.id || null} close={() => setPhoto(false)} replace={() => { setPhoto(false); fileRef.current?.click(); }} />}
+    </section>
+  );
+}
+
+function PhotoView({ id, uid, close, replace }: { id: string; uid: string | null; close: () => void; replace: () => void }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
+  useEffect(() => { let u = ''; getPhoto(uid, id).then((b) => { if (b) { u = URL.createObjectURL(b); setSrc(u); } else setMissing(true); }).catch(() => setMissing(true)); return () => { if (u) URL.revokeObjectURL(u); }; }, [id, uid]);
+  return (
+    <div className="backdrop" onClick={close}>
+      <div className="sheet photo-sheet" role="dialog" aria-label="Receipt photo" onClick={(e) => e.stopPropagation()}>
+        <span className="grabber" aria-hidden="true" />
+        <button className="icon-btn sheet-x" aria-label="Close" onClick={close}><X size={18} /></button>
+        {src ? <img src={src} alt="Receipt photo" className="receipt-img" /> : <div className="empty"><ImageIc size={28} /><b>{missing ? 'Photo not on this device' : 'Loading…'}</b>{missing && <span className="muted">Sign in on the phone that took it to sync it.</span>}</div>}
+        <button className="btn ghost" onClick={replace}><Camera size={18} /> Replace photo</button>
+      </div>
+    </div>
+  );
+}
+
+function PlaceTag({ rec, save }: { rec: Rec; save: (place: string, location?: string) => void }) {
+  const [edit, setEdit] = useState(false);
+  const [name, setName] = useState(rec.place);
+  const [loc, setLoc] = useState(rec.location || '');
+  const [busy, setBusy] = useState('');
+  const locate = () => {
+    if (!navigator.geolocation) { setBusy('Location is not available on this device.'); return; }
+    setBusy('Finding you…');
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      try {
+        // Only the place name is kept. Coordinates are rounded and never stored.
+        const { latitude: la, longitude: lo } = pos.coords;
+        const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=16&lat=${la.toFixed(3)}&lon=${lo.toFixed(3)}`, { headers: { 'accept-language': 'en' } });
+        const d = await r.json(); const a = d.address || {};
+        const area = a.suburb || a.neighbourhood || a.quarter || a.city_district || a.road || a.town || a.city || '';
+        setLoc([area, a.country === 'Singapore' ? '' : a.city || a.country].filter(Boolean).join(', ') || 'Singapore'); setBusy('');
+      } catch { setBusy("Couldn't look up the place. Type it instead."); }
+    }, () => setBusy('Location permission was declined. Type it instead.'), { enableHighAccuracy: false, timeout: 10000, maximumAge: 600000 });
+  };
+  if (!edit) return (
+    <button className="placetag" onClick={() => setEdit(true)} aria-label="Edit restaurant and location">
+      <b>{rec.place}</b>{rec.location ? <span className="muted"><MapPin size={13} /> {rec.location}</span> : <span className="muted"><MapPin size={13} /> Add location</span>}<PenLine size={13} />
+    </button>
+  );
+  return (
+    <div className="placeedit">
+      <label className="pill-field sm"><Receipt size={16} /><input aria-label="Restaurant" placeholder="Restaurant" maxLength={60} value={name} onChange={(e) => setName(e.target.value)} /></label>
+      <label className="pill-field sm"><MapPin size={16} /><input aria-label="Location" placeholder="Location (optional)" maxLength={60} value={loc} onChange={(e) => setLoc(e.target.value)} /></label>
+      <div className="share"><button className="chip-btn" onClick={locate}><MapPin size={16} /> Use my location</button></div>
+      {busy && <p className="small muted">{busy}</p>}
+      <div className="row gap8"><button className="btn ghost compact" onClick={() => { setEdit(false); setName(rec.place); setLoc(rec.location || ''); }}>Cancel</button><button className="btn primary compact" onClick={() => { save(name.trim() || 'Bill', loc.trim() || undefined); setEdit(false); }}>Save</button></div>
+    </div>
+  );
+}
+
+function Confetti({ colors }: { colors: string[] }) {
+  const bits = Array.from({ length: 70 }, (_, i) => ({ l: (i * 37) % 100, d: (i % 10) * 70, t: 1600 + ((i * 53) % 900), c: colors[i % colors.length], r: (i * 47) % 360, w: 6 + (i % 3) * 3, round: i % 4 === 0 }));
+  return <div className="confetti" aria-hidden="true">{bits.map((b, i) => <i key={i} style={{ left: b.l + '%', background: b.c, width: b.w, height: b.round ? b.w : b.w * 1.6, borderRadius: b.round ? '50%' : 3, animationDelay: b.d + 'ms', animationDuration: b.t + 'ms', ['--r' as string]: b.r + 'deg' }} />)}</div>;
+}
+
+function MoneyStepper({ value, set, max, label, step = 0.5 }: { value: number; set: (n: number) => void; max: number; label: string; step?: number }) {
+  const r = (n: number) => Math.round(Math.min(max, Math.max(0, n)) * 100) / 100;
+  return (
+    <span className="stepper" role="group" aria-label={label}>
+      <button onClick={() => { buzz(6); set(r(value - step)); }} aria-label="Less" disabled={value <= 0}><Minus size={16} /></button>
+      <b className="num">{money(value)}</b>
+      <button onClick={() => { buzz(6); set(r(value + step)); }} aria-label="More" disabled={value >= max}><Plus size={16} /></button>
+    </span>
+  );
+}
+
+const vLabel = (v?: Voucher) => (!v || !(v.value > 0) ? undefined : v.kind === 'pct' ? `${v.value}% off` : `${money(v.value)} off`);
+function VoucherPicker({ v, set, off }: { v?: Voucher; set: (v?: Voucher) => void; off: number }) {
+  const [open, setOpen] = useState(!!v);
+  if (!open) return <div className="line"><span>Voucher</span><button className="chip-btn" onClick={() => { setOpen(true); }}><Tag size={14} /> Add voucher</button></div>;
+  const kind = v?.kind || 'pct';
+  return (
+    <div className="voucher">
+      <div className="line"><span className="row gap8"><Tag size={16} /> Voucher</span>{off > 0 ? <b className="num ok">−{money(off / 100)}</b> : <span className="muted small">Pick one</span>}</div>
+      <div className="seg" role="radiogroup" aria-label="Voucher type">
+        {(['pct', 'amt'] as const).map((k) => <button key={k} role="radio" aria-checked={kind === k} className={kind === k ? 'on' : ''} onClick={() => set({ kind: k, value: k === kind ? v?.value || 0 : 0 })}>{k === 'pct' ? '% off' : 'S$ off'}</button>)}
+      </div>
+      <div className="share">
+        {(kind === 'pct' ? [5, 10, 15, 20, 30, 50] : [3, 5, 10, 15, 20, 50]).map((n) => (
+          <button key={n} className={'chip-btn' + (v?.value === n && v.kind === kind ? ' on' : '')} aria-pressed={v?.value === n && v.kind === kind} onClick={() => { buzz(8); set({ kind, value: n }); }}>{kind === 'pct' ? `${n}%` : `S$${n}`}</button>
+        ))}
+      </div>
+      <div className="line">
+        <span className="small muted">{kind === 'pct' ? 'Fine-tune' : 'Exact amount'}</span>
+        {kind === 'pct' ? <Stepper label="Percent off" value={v?.value || 0} max={100} set={(n) => set({ kind, value: n })} />
+          : <MoneyStepper label="Amount off" value={v?.value || 0} max={1000} set={(n) => set({ kind, value: n })} />}
+      </div>
+      <button className="btn text sm-text" onClick={() => { set(undefined); setOpen(false); }}>Remove voucher</button>
+      <p className="small muted">Taken off before service charge and GST, shared by what each person ordered.</p>
+    </div>
+  );
+}
+
+const frac = (w: number, W: number) => { if (!W || !w) return '0'; const g = (a: number, b: number): number => (b ? g(b, a % b) : a); const d = g(w, W); return W / d === 1 ? 'all' : `${w / d}/${W / d}`; };
+function PortionBar({ item, people, a }: { item: Item; people: Person[]; a: Record<string, number> }) {
+  const on = people.filter((p) => (a[p.id] || 0) > 0); const W = on.reduce((s, p) => s + a[p.id], 0);
+  if (!on.length) return null;
+  const net = itemNetCents(item) / 100;
+  return (
+    <div className="portions">
+      <div className="pbar">{on.map((p) => <i key={p.id} style={{ flex: a[p.id], background: p.color }} />)}</div>
+      <div className="plegend">{on.map((p) => <span key={p.id}><i style={{ background: p.color }} />{p.name} <b className="num">{frac(a[p.id], W)}</b> <span className="num muted">{money((net * a[p.id]) / W)}</span></span>)}</div>
+      <p className="small muted">Use + to give someone a bigger portion, e.g. 2 and 1 splits it 2:1. Before charges.</p>
+    </div>
+  );
+}
+
+/* ---------- Friends & balances ---------- */
+type Bal = { key: string; name: string; color: string; total: number; bills: { rec: Rec; pid: string; amount: number }[] };
+function balances(history: Rec[], friends: Friend[]): Bal[] {
+  const m = new Map<string, Bal>();
+  for (const r of history) for (const p of r.people.slice(1)) {
+    if (p.paid || !(p.share > 0) || /^Friend \d+$/.test(p.name)) continue;
+    const k = p.name.trim().toLowerCase();
+    const b = m.get(k) || { key: k, name: p.name.trim(), color: friends.find((f) => f.name.toLowerCase() === k)?.color || p.color, total: 0, bills: [] };
+    b.bills.push({ rec: r, pid: p.id, amount: p.share }); b.total = Math.round((b.total + p.share) * 100) / 100; m.set(k, b);
+  }
+  return [...m.values()].sort((a, b) => b.total - a.total);
+}
+function FriendsView({ history, friends, setHistory, notify, payee, open }: { history: Rec[]; friends: Friend[]; setHistory: (f: (h: Rec[]) => Rec[]) => void; notify: (t: Toast) => void; payee: Payee; open: (id: string) => void }) {
+  const list = balances(history, friends);
+  const [sel, setSel] = useState<string | null>(null);
+  const [sure, setSure] = useState(false);
+  const [nudge, setNudge] = useState(false);
+  const [party, setParty] = useState(0);
+  const total = list.reduce((s, b) => s + Math.round(b.total * 100), 0) / 100;
+  const b = list.find((x) => x.key === sel);
+  const settled = friends.filter((f) => !list.some((x) => x.key === f.name.toLowerCase()));
+  const settleAll = (x: Bal) => {
+    let snap: Rec[] = [];
+    const ids = new Map(x.bills.map((e) => [e.rec.id, e.pid]));
+    setHistory((h) => { snap = h; return h.map((r) => (ids.has(r.id) ? { ...r, updatedAt: Date.now(), people: r.people.map((p) => (p.id === ids.get(r.id) ? { ...p, paid: true } : p)) } : r)); });
+    buzz(40); setParty((n) => n + 1); setSure(false); setSel(null);
+    notify({ msg: `${x.name} is all settled`, undo: () => setHistory(() => snap) });
+  };
+  const payTo = payee.name || fmtSG(payee.mobile);
+  return (
+    <section className="stack">
+      {party > 0 && <Confetti key={party} colors={COLORS} />}
+      <div className="hero center"><p className="muted">Friends owe you</p><h1 className="num huge">{money(total)}</h1><p className="muted small">{list.length ? `${list.length} friend${list.length > 1 ? 's' : ''} with unpaid bills` : 'Everyone is square'}</p></div>
+      {!list.length && <div className="empty"><HandCoins size={32} /><b>All square</b><span className="muted">When friends owe you from a saved bill, they show up here.</span></div>}
+      <ul className="fbal">
+        {list.map((x) => (
+          <li key={x.key} className={'fb' + (sel === x.key ? ' open' : '')} style={{ ['--pc' as string]: x.color }}>
+            <button className="fb-head" aria-expanded={sel === x.key} onClick={() => { buzz(8); setSel(sel === x.key ? null : x.key); setSure(false); setNudge(false); }}>
+              <span className="av" style={{ background: x.color, width: 48, height: 48, fontSize: 16 }}>{ini(x.name)}</span>
+              <span className="hmain"><b>{x.name} owes you {money(x.total)}</b><small className="muted">{x.bills.length} unpaid bill{x.bills.length > 1 ? 's' : ''}</small></span>
+            </button>
+            {sel === x.key && b && <div className="fb-body">
+              <ul className="fb-bills">{b.bills.map((e) => <li key={e.rec.id}><button onClick={() => open(e.rec.id)}><span><b>{e.rec.place}</b><small className="muted">{fmtDate(e.rec.date)}</small></span><b className="num">{money(e.amount)}</b></button></li>)}</ul>
+              {!sure ? <div className="share">
+                  <button className="chip-btn paid-btn" onClick={() => setSure(true)}><CircleCheck size={16} /> Settle all</button>
+                  {normalizeMobile(payee.mobile) && <button className={'chip-btn' + (nudge ? ' on' : '')} onClick={() => setNudge((n) => !n)}><Bell size={16} /> Nudge for {money(b.total)}</button>}
+                </div>
+                : <div className="confirm"><p>Mark <b>{b.bills.length} bill{b.bills.length > 1 ? 's' : ''}</b> ({money(b.total)}) as paid by {b.name}?</p><div className="row gap8"><button className="btn ghost" onClick={() => setSure(false)}>Not yet</button><button className="btn primary" style={{ flex: 1 }} onClick={() => settleAll(b)}>Settle all</button></div></div>}
+              {nudge && !sure && <div className="combo">
+                <PayQR mobile={payee.mobile} amount={b.total} who={b.name} payTo={payTo} place={b.bills.length > 1 ? `${b.bills.length} bills` : b.bills[0].rec.place} />
+                <TextShare text={`Hey ${b.name}! Friendly nudge 🙏 You owe ${payTo} ${money(b.total)} in total for ${b.bills.map((e) => `${e.rec.place} (${money(e.amount)})`).join(', ')}. PayNow ${fmtSG(payee.mobile)}. Thanks!`} url={b.bills.find((e) => e.rec.share)?.rec.share ? shareUrl(b.bills.find((e) => e.rec.share)!.rec.share!.id) : APP_URL} label="More" />
+              </div>}
+            </div>}
+          </li>
+        ))}
+      </ul>
+      {settled.length > 0 && <div className="friends"><span className="sub">All square</span><div className="fchips">{settled.map((f) => <span key={f.name} className="fchip" style={{ ['--pc' as string]: f.color }}><span className="av" style={{ background: f.color, width: 32, height: 32, fontSize: 12 }}>{ini(f.name)}</span>{f.name}<Check size={14} /></span>)}</div></div>}
     </section>
   );
 }
@@ -848,6 +1060,7 @@ function NudgeRow({ rec, who, amount, payTo, ensure }: { rec: Rec; who: string; 
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   if (!open) return <button className="chip-btn" disabled={busy} onClick={async () => { setBusy(true); const u = await ensure(); setBusy(false); if (u) { setUrl(u); setOpen(true); } }}><Bell size={16} /> {busy ? 'Nudge…' : 'Nudge'}</button>;
-  const text = `Hey ${who}! Gentle nudge for ${rec.place} 🙏 Your share is ${money(amount)}. PayNow ${payTo === fmtSG(rec.payee.mobile) ? fmtSG(rec.payee.mobile) : `${payTo} (${fmtSG(rec.payee.mobile)})`} or tap your name here for the QR:`;
+  const saved = rec.breakdown && rec.breakdown.itemDisc + rec.breakdown.voucher > 0 ? ' (after discounts)' : '';
+  const text = `Hey ${who}! Gentle nudge for ${rec.place} 🙏 Your share is ${money(amount)}${saved}. PayNow ${payTo === fmtSG(rec.payee.mobile) ? fmtSG(rec.payee.mobile) : `${payTo} (${fmtSG(rec.payee.mobile)})`} or tap your name here for the QR:`;
   return <TextShare text={text} url={url!} label="More" />;
 }

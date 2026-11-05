@@ -2,8 +2,9 @@
 // Bills: last write wins per bill (by updatedAt). Deletions are detected by comparing with the
 // set of ids we last saw on the server, and pushed as soft deletes so other devices drop them too.
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { upload, removeCloud, delLocal } from './photos';
 
-export type SRec = { id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; updatedAt?: number;
+export type SRec = { id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; updatedAt?: number; photo?: boolean;
   people: { id: string; name: string; color: string; share: number; paid: boolean }[] };
 export type SFriend = { name: string; color: string; count: number };
 export type SPayee = { mobile: string; name: string };
@@ -40,7 +41,12 @@ export async function syncAll(sb: SupabaseClient, uid: string, local: { history:
     const rows = push.flatMap((r) => r.people.map((p, i) => ({ user_id: uid, bill_id: r.id, person_id: p.id, name: p.name.slice(0, 40), color: /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : '#475569', is_me: i === 0, share: p.share, paid: p.paid, paid_at: p.paid ? new Date().toISOString() : null })));
     if (rows.length) { const { error: e2 } = await sb.from('bill_people').upsert(rows); if (e2) throw e2; }
   }
-  if (tomb.length) { const { error } = await sb.from('bills').update({ deleted_at: new Date().toISOString() }).in('id', tomb); if (error) throw error; }
+  if (tomb.length) { const { error } = await sb.from('bills').update({ deleted_at: new Date().toISOString() }).in('id', tomb); if (error) throw error; await removeCloud(uid, tomb).catch(() => {}); }
+  // receipt photos: upload ones not yet in the cloud; drop cloud copies of bills deleted elsewhere
+  const upKey = `ws-photo-up-${uid}`, up = getSet(upKey);
+  for (const r of out.values()) if (r.photo && !up.has(r.id)) { if (await upload(uid, r.id).catch(() => false)) up.add(r.id); }
+  for (const [id, rm] of remote) if (rm.deleted) { up.delete(id); delLocal(id); }
+  putSet(upKey, up);
   putSet(seenKey, new Set(out.keys()));
 
   // ---- friends (union by lower-case name; deletions via seen set)

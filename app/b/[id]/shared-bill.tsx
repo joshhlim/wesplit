@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import Link from 'next/link';
-import { CircleCheck, Copy, Check, RefreshCw } from 'lucide-react';
+import { CircleCheck, Copy, Check, RefreshCw, MapPin, Tag } from 'lucide-react';
 import { paynowPayload } from '@/lib/split.mjs';
 import { Mark } from '@/components/brand';
 import { money, type Shared } from '@/lib/shared';
@@ -33,6 +33,7 @@ export default function SharedBill({ id, initial }: { id: string; initial: Share
       <div className="hero center">
         <p className="muted">{host?.name || 'Your friend'} split this bill</p>
         <h1>{s.place}</h1>
+        {s.location && <p className="muted small"><MapPin size={13} /> {s.location}</p>}
         <p className="muted small">{new Date(s.date).toLocaleDateString('en-SG', { day: 'numeric', month: 'short', year: 'numeric' })} · {money(s.total)} total{s.mode ? ` · ${s.mode}` : ''}</p>
       </div>
 
@@ -64,11 +65,27 @@ export default function SharedBill({ id, initial }: { id: string; initial: Share
         <section className="stack">
           <h2 className="sub">What was ordered</h2>
           <ul className="slist">
-            {s.items.map((it, i) => (
-              <li key={i}><span><b>{it.name}</b>{it.who.length > 0 && <small className="muted">{it.who.map(nameOf).filter(Boolean).join(', ')}</small>}</span><span className="num">{money(it.price)}</span></li>
-            ))}
+            {s.items.map((it, i) => {
+              const W = it.w ? Object.values(it.w).reduce((a, b) => a + b, 0) : 0;
+              const uneven = it.w && new Set(Object.values(it.w)).size > 1;
+              const net = it.free ? 0 : Math.max(0, it.price - (it.disc || 0));
+              return (
+                <li key={i} className={me && it.who.includes(me) ? 'mine' : ''}>
+                  <span><b>{it.name}</b>{it.who.length > 0 && <small className="muted">{it.who.map((w) => nameOf(w) + (uneven && it.w ? ` ${it.w[w]}/${W}` : '')).filter(Boolean).join(', ')}</small>}</span>
+                  <span className="num">{it.free ? <><s>{money(it.price)}</s> <em className="freetag">Free</em></> : it.disc ? <><s>{money(it.price)}</s> {money(net)}</> : money(it.price)}</span>
+                </li>
+              );
+            })}
           </ul>
-          <p className="muted small center">Shares include service charge and GST where applied, rounded so they add up exactly to {money(s.total)}.</p>
+          {s.breakdown && <div className="soft">
+            <div className="line"><span>Items</span><span className="num">{money(s.breakdown.gross / 100)}</span></div>
+            {s.breakdown.itemDisc > 0 && <div className="line disc"><span>Item discounts</span><span className="num">−{money(s.breakdown.itemDisc / 100)}</span></div>}
+            {s.breakdown.voucher > 0 && <div className="line disc"><span><Tag size={13} /> Voucher{s.voucher ? ` (${s.voucher})` : ''}</span><span className="num">−{money(s.breakdown.voucher / 100)}</span></div>}
+            {s.breakdown.sc > 0 && <div className="line muted"><span>Service charge 10%</span><span className="num">{money(s.breakdown.sc / 100)}</span></div>}
+            {s.breakdown.gst > 0 && <div className="line muted"><span>GST 9%</span><span className="num">{money(s.breakdown.gst / 100)}</span></div>}
+            <div className="line total"><span>Total</span><b className="num">{money(s.total)}</b></div>
+          </div>}
+          <p className="muted small center">Discounts come off first, then service charge and GST, shared by what each person had. Shares add up exactly to {money(s.total)}.</p>
         </section>
       )}
 
