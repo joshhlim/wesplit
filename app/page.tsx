@@ -4,9 +4,12 @@ import QRCode from 'qrcode';
 import { Camera, ChevronLeft, Plus, Minus, X, Check, Ellipsis, Sun, Moon, Share2, Download, Copy, Trash2, Lock, Receipt, CircleAlert, RotateCcw, MessageCircle, Send, PenLine, WifiOff, ArrowRight, QrCode, Users } from 'lucide-react';
 import { MODES, detectMode, split, itemsSum, paynowPayload, normalizeMobile } from '@/lib/split.mjs';
 import { Mark } from '@/components/brand';
-import { History as HistoryIc, CircleCheck, Circle, Bell } from 'lucide-react';
+import { History as HistoryIc, CircleCheck, Circle, Bell, UserRound, Mail, LogOut, Cloud, CloudOff } from 'lucide-react';
+import { supa } from '@/lib/supabase';
+import { syncAll } from '@/lib/sync';
+import type { User } from '@supabase/supabase-js';
 
-type Rec = { id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; people: { id: string; name: string; color: string; share: number; paid: boolean }[] };
+type Rec = { updatedAt?: number; id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; people: { id: string; name: string; color: string; share: number; paid: boolean }[] };
 type Friend = { name: string; color: string; count: number };
 const load = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } };
 
@@ -64,6 +67,40 @@ export default function Home() {
   const [friends, setFriends] = useState<Friend[]>([]);
   const [view, setView] = useState<null | 'history' | string>(null);
   const tt = useRef(0);
+  const [user, setUser] = useState<User | null>(null);
+  const [acct, setAcct] = useState(false);
+  const [sync, setSync] = useState<'idle' | 'busy' | 'ok' | 'off' | 'err'>('idle');
+  const syncing = useRef(false), again = useRef(false), st = useRef(0), latest = useRef({ history, friends, payee });
+  latest.current = { history, friends, payee };
+  const runSync = useCallback(async () => {
+    const sb = supa(); if (!sb || !user) return;
+    if (!navigator.onLine) { setSync('off'); return; }
+    if (syncing.current) { again.current = true; return; }
+    syncing.current = true; setSync('busy');
+    try {
+      const out = await syncAll(sb, user.id, latest.current);
+      const same = JSON.stringify(out.history) === JSON.stringify(latest.current.history) && JSON.stringify(out.friends) === JSON.stringify(latest.current.friends);
+      if (!same) { setHistory(out.history as Rec[]); setFriends(out.friends); }
+      if (out.payee.mobile !== latest.current.payee.mobile) setPayee(out.payee);
+      setSync('ok');
+    } catch { setSync(navigator.onLine ? 'err' : 'off'); }
+    syncing.current = false;
+    if (again.current) { again.current = false; runSync(); }
+  }, [user]);
+  useEffect(() => {
+    const sb = supa(); if (!sb) return;
+    sb.auth.getUser().then(({ data }) => setUser(data.user));
+    const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setUser(s?.user ?? null));
+    const q = new URLSearchParams(location.search);
+    if (q.has('signedin') || q.has('authError')) {
+      if (q.get('authError')) setTimeout(() => notify({ msg: q.get('authError')! }), 50); else setTimeout(() => notify({ msg: 'Signed in. Your bills will sync.' }), 50);
+      window.history.replaceState(null, '', '/');
+    }
+    return () => sub.subscription.unsubscribe();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => { if (!user || !loaded) return; clearTimeout(st.current); st.current = window.setTimeout(runSync, 1200); }, [user, loaded, history, friends, payee, runSync]);
+  useEffect(() => { const on = () => runSync(), off = () => setSync('off'); addEventListener('online', on); addEventListener('offline', off); return () => { removeEventListener('online', on); removeEventListener('offline', off); }; }, [runSync]);
 
   useEffect(() => {
     try {
@@ -90,7 +127,7 @@ export default function Home() {
         for (const p of r.people.slice(1)) { const f = out.find((x) => x.name.toLowerCase() === p.name.trim().toLowerCase()); if (f) { f.count++; f.color = p.color; } else if (p.name.trim() && !/^Friend \d+$/.test(p.name)) out.push({ name: p.name.trim(), color: p.color, count: 1 }); }
         return out;
       });
-      const merged = { ...r, date: old?.date || r.date, people: r.people.map((p) => ({ ...p, paid: old?.people.find((q) => q.id === p.id)?.paid || false })) };
+      const merged = { ...r, date: old?.date || r.date, updatedAt: Date.now(), people: r.people.map((p) => ({ ...p, paid: old?.people.find((q) => q.id === p.id)?.paid || false })) };
       return [merged, ...h.filter((x) => x.id !== r.id)];
     });
   }, []);
@@ -145,7 +182,8 @@ export default function Home() {
           </div>
         ) : (view || step > 0) && <span className="title">{view ? 'History' : STEPS[step]}</span>}
         <div className="row gap4">
-          {bill.items.length > 0 && <button className="icon-btn" aria-label="New bill" onClick={newBill}><RotateCcw size={18} /></button>}
+          {supa() && <button className={'icon-btn acct' + (user ? ' in' : '')} aria-label={user ? 'Account' : 'Sign in'} onClick={() => setAcct(true)}>{user ? (user.email || '?')[0].toUpperCase() : <UserRound size={18} />}</button>}
+          {!view && bill.items.length > 0 && <button className="icon-btn" aria-label="New bill" onClick={newBill}><RotateCcw size={18} /></button>}
           <button className="icon-btn" aria-label={theme === 'dark' ? 'Light mode' : 'Dark mode'} onClick={toggleTheme}>{theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}</button>
         </div>
       </header>
@@ -169,12 +207,87 @@ export default function Home() {
       </div></>}
 
       <footer className="foot">
-        <span><Lock size={12} /> Your data stays on your phone.</span>
+        <span><Lock size={12} /> {user ? 'Synced privately to your account.' : 'Your data stays on your phone.'}</span>
+        <a href="/privacy">Privacy</a>
         <a href={REPO} target="_blank" rel="noopener">Source on GitHub</a>
       </footer>
+      {acct && <AccountSheet user={user} sync={sync} close={() => setAcct(false)} notify={notify} />}
     </main>
   );
 }
+
+function AccountSheet({ user, sync, close, notify }: { user: User | null; sync: string; close: () => void; notify: (t: Toast) => void }) {
+  const [email, setEmail] = useState('');
+  const [sent, setSent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [confirm, setConfirm] = useState(0);
+  useEffect(() => { if (confirm > 1) { const t = setTimeout(() => setConfirm((c) => c - 1), 1000); return () => clearTimeout(t); } }, [confirm]);
+  const sb = supa()!;
+  const cb = location.origin + '/auth/callback';
+  const google = async () => {
+    setErr(''); const { error } = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: cb } });
+    if (error) setErr(/not enabled|provider/i.test(error.message) ? 'Google sign-in isn\'t switched on yet. Use the email link for now.' : error.message);
+  };
+  const magic = async (e: React.FormEvent) => {
+    e.preventDefault(); setErr('');
+    if (!/^\S+@\S+\.\S+$/.test(email)) { setErr('Enter a valid email address.'); return; }
+    setBusy(true);
+    const { error } = await sb.auth.signInWithOtp({ email: email.trim(), options: { emailRedirectTo: cb } });
+    setBusy(false);
+    if (error) setErr(/rate/i.test(error.message) ? 'Too many emails sent. Try again in a little while.' : error.message); else setSent(true);
+  };
+  const out = async () => { await sb.auth.signOut(); close(); notify({ msg: 'Signed out. Bills stay on this phone.' }); };
+  const del = () => {
+    close();
+    let undone = false;
+    notify({ msg: 'Deleting your account…', undo: () => { undone = true; } });
+    setTimeout(async () => {
+      if (undone) return;
+      const { error } = await sb.rpc('delete_my_account');
+      if (error) { notify({ msg: "Couldn't delete your account. Try again." }); return; }
+      await sb.auth.signOut();
+      notify({ msg: 'Account and synced data deleted.' });
+    }, 4200);
+  };
+  const status = sync === 'busy' ? 'Syncing…' : sync === 'off' ? 'Offline. Will sync when you\'re back.' : sync === 'err' ? 'Sync paused. Retrying soon.' : 'All bills synced';
+  return (
+    <div className="backdrop" onClick={close}>
+      <div className="sheet" role="dialog" aria-modal="true" aria-label={user ? 'Account' : 'Sign in'} onClick={(e) => e.stopPropagation()}>
+        <span className="grabber" />
+        <button className="icon-btn sheet-x" aria-label="Close" onClick={close}><X size={18} /></button>
+        {!user ? sent ? <div className="sheet-body center">
+            <span className="sheet-ic"><Mail size={26} /></span>
+            <h2>Check your email</h2>
+            <p className="muted">We sent a sign-in link to <b>{email}</b>. Open it on this phone.</p>
+            <button className="btn ghost" onClick={() => setSent(false)}>Use a different email</button>
+          </div> : <div className="sheet-body">
+            <h2>Keep your bills everywhere</h2>
+            <p className="muted">Sign in to sync bills, paid status and friends across your devices. Optional. WeSplit works fine without it.</p>
+            <button className="btn google" onClick={google}><GoogleG /> Continue with Google</button>
+            <div className="or"><span>or</span></div>
+            <form onSubmit={magic} className="col gap8" noValidate>
+              <input className="pill-input" type="email" inputMode="email" autoComplete="email" placeholder="you@email.com" value={email} onChange={(e) => setEmail(e.target.value)} aria-label="Email" />
+              <button className="btn primary" disabled={busy}><Mail size={18} /> {busy ? 'Sending…' : 'Email me a link'}</button>
+            </form>
+            {err && <p className="err" role="alert"><CircleAlert size={14} /> {err}</p>}
+            <p className="fine">Bills already on this phone are added to your account. <a href="/privacy">Privacy</a></p>
+          </div>
+          : <div className="sheet-body">
+            <div className="who"><span className="acct in big">{(user.email || '?')[0].toUpperCase()}</span><div><b>{user.email}</b><span className="muted">{sync === 'off' || sync === 'err' ? <CloudOff size={13} /> : <Cloud size={13} />} {status}</span></div></div>
+            <button className="btn ghost" onClick={out}><LogOut size={18} /> Sign out</button>
+            {!confirm ? <button className="btn danger-link" onClick={() => setConfirm(4)}><Trash2 size={16} /> Delete account and data</button>
+              : <div className="confirm">
+                <p><b>Delete your account?</b> This removes your synced bills, friends and PayNow details from our servers. Bills on this phone stay.</p>
+                <div className="row gap8"><button className="btn ghost" onClick={() => setConfirm(0)}>Keep account</button><button className="btn del" disabled={confirm > 1} onClick={del}>{confirm > 1 ? `Delete (${confirm - 1})` : 'Delete'}</button></div>
+              </div>}
+            <p className="fine"><a href="/privacy">What we store</a></p>
+          </div>}
+      </div>
+    </div>
+  );
+}
+const GoogleG = () => <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>;
 
 /* ---------- shared bits ---------- */
 function Avatar({ p, size = 40 }: { p: Person; size?: number }) {
@@ -637,7 +750,7 @@ function BillDetail({ rec, setHistory, notify, close }: { rec?: Rec; setHistory:
   const others = rec.people.slice(1).filter((p) => p.share > 0);
   const paid = others.filter((p) => p.paid).length;
   const payTo = rec.payee.name || fmtSG(rec.payee.mobile);
-  const toggle = (pid: string) => { buzz(12); setHistory((h) => h.map((r) => (r.id !== rec.id ? r : { ...r, people: r.people.map((p) => (p.id === pid ? { ...p, paid: !p.paid } : p)) }))); };
+  const toggle = (pid: string) => { buzz(12); setHistory((h) => h.map((r) => (r.id !== rec.id ? r : { ...r, updatedAt: Date.now(), people: r.people.map((p) => (p.id === pid ? { ...p, paid: !p.paid } : p)) }))); };
   const del = () => { let snap: Rec[] = []; setHistory((h) => { snap = h; return h.filter((r) => r.id !== rec.id); }); close(); notify({ msg: 'Bill deleted', undo: () => setHistory(() => snap) }); };
   return (
     <section className="stack">
