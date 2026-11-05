@@ -1,8 +1,8 @@
 import './globals.css';
 import type { Metadata, Viewport } from 'next';
-import { Geist } from 'next/font/google';
+import { Nunito } from 'next/font/google';
 
-const geist = Geist({ subsets: ['latin'], display: 'swap', variable: '--font' });
+const geist = Nunito({ subsets: ['latin'], display: 'swap', variable: '--font' });
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://wesplit-sg.vercel.app'),

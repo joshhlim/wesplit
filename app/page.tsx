@@ -15,15 +15,15 @@ type Toast = { msg: string; undo?: () => void } | null;
 
 // Person colours: all pass WCAG AA with white initials.
 const COLORS = ['#0B7A5A', '#4F46E5', '#B45309', '#C81E1E', '#0E7490', '#BE185D', '#4D7C0F', '#7C3AED', '#C2410C', '#475569'];
-const NAMES = ['Me', 'Friend 1', 'Friend 2', 'Friend 3', 'Friend 4', 'Friend 5', 'Friend 6', 'Friend 7', 'Friend 8', 'Friend 9'];
+const NAMES = ['Friend 1', 'Friend 2', 'Friend 3', 'Friend 4', 'Friend 5', 'Friend 6', 'Friend 7', 'Friend 8', 'Friend 9'];
 const STEPS = ['Scan', 'People', 'Assign', 'Settle'] as const;
 const REPO = 'https://github.com/joshhlim/wesplit';
 const APP_URL = 'https://wesplit-sg.vercel.app';
 const uid = () => Math.random().toString(36).slice(2, 9);
 const money = (n: number) => 'S$' + (Math.round((n || 0) * 100) / 100).toFixed(2);
-const ini = (n: string) => { const w = n.trim().split(/\s+/); return ((w.length > 1 ? w.map((x) => x[0]).join('') : n).slice(0, 2).toUpperCase()) || '?'; };
+const ini = (n: string) => { if (n.trim().toLowerCase() === 'you') return 'You'; const w = n.trim().split(/\s+/); return ((w.length > 1 ? w.map((x) => x[0]).join('') : n).slice(0, 2).toUpperCase()) || '?'; };
 const buzz = (ms = 10) => { try { navigator.vibrate?.(ms); } catch {} };
-const empty = (): Bill => ({ merchant: null, total: null, items: [], people: [{ id: uid(), name: 'Me', color: COLORS[0] }], assign: {}, mode: 'sg', payer: '' });
+const empty = (): Bill => ({ merchant: null, total: null, items: [], people: [{ id: 'me', name: 'You', color: COLORS[0] }], assign: {}, mode: 'sg', payer: '' });
 
 async function shrink(file: File): Promise<Blob> {
   if (file.size < 1.5e6 && /jpeg|png|webp/.test(file.type)) return file;
@@ -42,22 +42,24 @@ export default function Home() {
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [mobile, setMobile] = useState('');
+  const [payee, setPayee] = useState<Payee>({ mobile: '', name: '' });
   const [theme, setTheme] = useState('light');
   const [toast, setToastState] = useState<Toast>(null);
   const tt = useRef(0);
 
   useEffect(() => {
     try {
-      const b = localStorage.getItem('ws-bill'); if (b) setBill(JSON.parse(b));
+      const b = localStorage.getItem('ws-bill');
+      if (b) { const x: Bill = JSON.parse(b); if (x.people?.[0] && x.people[0].name === 'Me') x.people[0].name = 'You'; if (!x.people?.length) x.people = empty().people; setBill(x); }
+      const pe = localStorage.getItem('ws-payee'); if (pe) setPayee(JSON.parse(pe));
+      else { const m = localStorage.getItem('ws-mobile'); if (m && normalizeMobile(m)) setPayee({ mobile: normalizeMobile(m)!, name: '' }); }
       const s = localStorage.getItem('ws-step'); if (s) setStep(+s);
-      setMobile(localStorage.getItem('ws-mobile') || '');
     } catch {}
     setTheme(document.documentElement.dataset.theme || 'light');
     setLoaded(true);
   }, []);
   useEffect(() => { if (loaded) { localStorage.setItem('ws-bill', JSON.stringify(bill)); localStorage.setItem('ws-step', String(step)); } }, [bill, step, loaded]);
-  useEffect(() => { if (loaded) localStorage.setItem('ws-mobile', mobile); }, [mobile, loaded]);
+  useEffect(() => { if (loaded) localStorage.setItem('ws-payee', JSON.stringify(payee)); }, [payee, loaded]);
 
   const toggleTheme = () => { const t = theme === 'dark' ? 'light' : 'dark'; setTheme(t); document.documentElement.dataset.theme = t; localStorage.setItem('ws-theme', t); };
   const up: Up = useCallback((f) => setBill((b) => f(structuredClone(b))), []);
@@ -119,7 +121,7 @@ export default function Home() {
           onManual={() => { up((b) => ({ ...b, merchant: null, total: null, assign: {}, items: [{ id: uid(), name: 'Item 1', qty: 1, price: 0 }] })); go(1); }} />}
         {step === 1 && <PeopleStep bill={bill} up={up} notify={notify} next={() => go(2)} />}
         {step === 2 && <AssignStep bill={bill} up={up} notify={notify} next={() => go(3)} detected={detected} total={result.total} shares={result.shares} />}
-        {step === 3 && <SettleStep bill={bill} up={up} notify={notify} shares={result.shares} total={result.total} mobile={mobile} setMobile={setMobile} />}
+        {step === 3 && <SettleStep bill={bill} notify={notify} shares={result.shares} total={result.total} payee={payee} setPayee={setPayee} />}
       </div>
 
       <footer className="foot">
@@ -138,7 +140,7 @@ export default function Home() {
 
 /* ---------- shared bits ---------- */
 function Avatar({ p, size = 40 }: { p: Person; size?: number }) {
-  return <span className="av" style={{ background: p.color, width: size, height: size, fontSize: Math.round(size * 0.36) }}>{ini(p.name)}</span>;
+  return <span className="av" style={{ background: p.color, width: size, height: size, fontSize: Math.round(size * 0.36) }}>{ini(p.name) === "You" ? "You" : ini(p.name)}</span>;
 }
 function Stepper({ value, set, min = 0, max = 20, label }: { value: number; set: (n: number) => void; min?: number; max?: number; label: string }) {
   return (
@@ -194,19 +196,18 @@ function PeopleStep({ bill, up, notify, next }: { bill: Bill; up: Up; notify: (t
   };
   return (
     <section className="stack">
-      <div className="hero"><h1>Who&apos;s splitting?</h1><p className="muted">Tap a name to change it.</p></div>
+      <div className="hero"><h1>Who&apos;s splitting?</h1><p className="muted">Add everyone at the table. Tap a name to change it.</p></div>
       <ul className="people">
-        {bill.people.map((p) => (
-          <li key={p.id} className="person">
+        {bill.people.map((p, i) => (
+          <li key={p.id} className="person" style={{ ['--pc' as string]: p.color }}>
             <Avatar p={p} size={40} />
             <input value={p.name} aria-label="Name" maxLength={16} onChange={(e) => up((b) => { b.people.find((x) => x.id === p.id)!.name = e.target.value; return b; })} />
-            {bill.people.length > 1 && <button className="icon-btn" aria-label={`Remove ${p.name}`} onClick={() => remove(p)}><X size={18} /></button>}
+            {i === 0 ? <span className="you-tag">You</span> : <button className="icon-btn" aria-label={`Remove ${p.name}`} onClick={() => remove(p)}><X size={18} /></button>}
           </li>
         ))}
       </ul>
       {bill.people.length < 10 && <button className="btn ghost" onClick={add}><Plus size={18} /> Add person</button>}
-      {bill.people.length === 1 && <p className="muted center small">Add the people at the table. You can rename them later.</p>}
-      <button className="btn primary" onClick={next}>Continue</button>
+            <button className="btn primary" onClick={next}>Continue</button>
     </section>
   );
 }
@@ -241,6 +242,9 @@ function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill:
   const sum = itemsSum(bill.items);
   const sheetItem = sheet ? bill.items.find((i) => i.id === sheet) : null;
   const left = bill.items.length - done;
+  const prevLeft = useRef(left);
+  const [party, setParty] = useState(0);
+  useEffect(() => { if (prevLeft.current > 0 && left === 0) { buzz(30); setParty((n) => n + 1); } prevLeft.current = left; }, [left]);
 
   if (!bill.items.length) return (
     <section className="stack">
@@ -251,6 +255,7 @@ function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill:
 
   return (
     <section className="stack">
+      {party > 0 && <Celebrate key={party} colors={bill.people.map((p) => p.color)} />}
       <div className="progress-wrap">
         <div className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={bill.items.length} aria-valuenow={done}><div style={{ width: `${(done / bill.items.length) * 100}%` }} /></div>
         <p className="small muted">{left ? <>Who had this? <span className="num">{done} of {bill.items.length}</span> assigned</> : <span className="ok"><Check size={14} /> Everything&apos;s assigned</span>}</p>
@@ -287,7 +292,7 @@ function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill:
       </ul>
       <button className="btn ghost" onClick={addItem}><Plus size={18} /> Add item</button>
 
-      <div className="card">
+      <div className="soft">
         <div className="line"><span>Items</span><b className="num">{money(sum)}</b></div>
         <div className="line">
           <span>Charges</span>
@@ -305,7 +310,7 @@ function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill:
         {bill.people.map((p) => (
           <button key={p.id} className={'tot' + (focus === p.id ? ' on' : '')} style={{ ['--pc' as string]: p.color }} aria-pressed={focus === p.id}
             onClick={() => { buzz(6); setFocus((f) => (f === p.id ? null : p.id)); }}>
-            <Avatar p={p} size={28} /><span><small>{p.name}</small><b className="num">{money(shares[p.id] || 0)}</b></span>
+            <Avatar p={p} size={32} /><span><small>{p.name}</small><b className="num">{money(shares[p.id] || 0)}</b></span>
           </button>
         ))}
       </div>
@@ -348,46 +353,76 @@ function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill:
 }
 
 /* ---------- 4. Settle ---------- */
-function SettleStep({ bill, up, notify, shares, total, mobile, setMobile }: { bill: Bill; up: Up; notify: (t: Toast) => void; shares: Record<string, number>; total: number; mobile: string; setMobile: (s: string) => void }) {
-  const payer = bill.people.find((p) => p.id === bill.payer) || bill.people[0];
-  const valid = normalizeMobile(mobile);
+type Payee = { mobile: string; name: string };
+const fmtSG = (m: string) => { const d = (normalizeMobile(m) || '').slice(3); return d ? `+65 ${d.slice(0, 4)} ${d.slice(4)}` : ''; };
+const maskSG = (m: string) => { const d = (normalizeMobile(m) || '').slice(3); return d ? `+65 •••• ${d.slice(4)}` : ''; };
+
+function PayMe({ initial, onSave, onCancel }: { initial: Payee; onSave: (p: Payee) => void; onCancel?: () => void }) {
+  const [num, setNum] = useState((normalizeMobile(initial.mobile) || '').slice(3));
+  const [name, setName] = useState(initial.name);
+  const [touched, setTouched] = useState(false);
+  const ok = /^[89]\d{7}$/.test(num);
+  return (
+    <section className="stack payme">
+      <span className="payme-ic"><QrCode size={28} /></span>
+      <div className="hero center"><h1>How should we pay you?</h1><p className="muted">Friends will scan a PayNow QR to pay this number. It stays on your phone.</p></div>
+      <label className="pill-field">
+        <span className="prefix">+65</span>
+        <input aria-label="PayNow mobile number" className="num" inputMode="numeric" autoComplete="tel-national" placeholder="9123 4567" maxLength={9} autoFocus
+          value={num.length > 4 ? `${num.slice(0, 4)} ${num.slice(4)}` : num}
+          onChange={(e) => setNum(e.target.value.replace(/\D/g, '').replace(/^65(?=\d{8})/, '').slice(0, 8))} onBlur={() => setTouched(true)} />
+      </label>
+      {touched && num && !ok && <p className="note warn center">Enter an 8-digit Singapore mobile starting with 8 or 9.</p>}
+      <label className="pill-field">
+        <input aria-label="Your name (optional)" placeholder="Your name (optional)" maxLength={24} value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <button className="btn primary" disabled={!ok} onClick={() => { buzz(12); onSave({ mobile: '+65' + num, name: name.trim() }); }}>Save</button>
+      {onCancel && <button className="btn text" onClick={onCancel}>Cancel</button>}
+    </section>
+  );
+}
+
+function SettleStep({ bill, notify, shares, total, payee, setPayee }: { bill: Bill; notify: (t: Toast) => void; shares: Record<string, number>; total: number; payee: Payee; setPayee: (p: Payee) => void }) {
+  const [editing, setEditing] = useState(false);
+  const me = bill.people[0];
+  const valid = normalizeMobile(payee.mobile);
   const place = bill.merchant || 'the bill';
+  const payTo = payee.name || fmtSG(payee.mobile);
+  const owing = bill.people.slice(1).filter((p) => (shares[p.id] || 0) > 0);
+  const allSet = !shares._;
+  if (!valid || editing) return <PayMe initial={payee} onSave={(p) => { setPayee(p); setEditing(false); notify({ msg: 'Saved. Friends will pay ' + fmtSG(p.mobile) }); }} onCancel={valid ? () => setEditing(false) : undefined} />;
   const summary = [
     `${bill.merchant || 'Bill'}: ${money(total)} (${MODES[bill.mode as Mode].label})`,
-    ...bill.people.map((p) => `${p.name}: ${money(shares[p.id] || 0)}${p.id === payer.id ? ' (paid)' : ''}`),
+    ...owing.map((p) => `${p.name} owes ${money(shares[p.id])}`),
+    `${me.name === 'You' ? 'My share' : me.name}: ${money(shares[me.id] || 0)}`,
     ...(shares._ ? [`Unassigned: ${money(shares._)}`] : []),
-    valid ? `PayNow ${payer.name}: ${valid}` : '',
-  ].filter(Boolean).join('\n');
-  const owing = bill.people.filter((p) => p.id !== payer.id && (shares[p.id] || 0) > 0);
+    `PayNow ${payee.name ? payee.name + ' ' : ''}${fmtSG(payee.mobile)}`,
+  ].join('\n');
+  const owed = owing.reduce((s, p) => s + Math.round(shares[p.id] * 100), 0) / 100;
   return (
     <section className="stack">
-      <div className="hero"><h1 className="num">{money(total)}</h1><p className="muted">{bill.merchant || 'Your bill'} · {MODES[bill.mode as Mode].label}</p></div>
-      <div className="card">
-        <label className="line"><span>Paid by</span>
-          <select value={payer.id} onChange={(e) => up((b) => ({ ...b, payer: e.target.value }))}>
-            {bill.people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-        </label>
-        <label className="line"><span>PayNow mobile</span>
-          <input className="mobile num" inputMode="tel" autoComplete="tel" placeholder="8123 4567" value={mobile} onChange={(e) => setMobile(e.target.value.replace(/[^\d +]/g, '').slice(0, 14))} />
-        </label>
-        {mobile && !valid ? <p className="note warn">Enter an 8-digit Singapore mobile number.</p> : !mobile && <p className="note muted">Add {payer.name}&apos;s number to show PayNow QR codes.</p>}
+      {allSet && <Celebrate colors={bill.people.map((p) => p.color)} />}
+      <div className="hero center">
+        <p className="muted">You&apos;re owed</p>
+        <h1 className="num huge">{money(owed)}</h1>
+        <p className="muted small">{bill.merchant || 'Your bill'} · {money(total)} total · {MODES[bill.mode as Mode].label}</p>
       </div>
+      <button className="paychip" onClick={() => setEditing(true)} aria-label="Change PayNow number"><QrCode size={16} /> Paying to <b className="num">{maskSG(payee.mobile)}</b><PenLine size={14} /></button>
+      {owing.length === 0 && <div className="empty soft"><Users size={28} /><b>Nobody owes you yet</b><span className="muted">Assign items to your friends first.</span></div>}
       <ul className="settle">
-        {bill.people.map((p) => (
-          <li key={p.id} className="card">
-            <div className="line"><span className="row gap8"><Avatar p={p} size={32} /><b>{p.name}</b></span><b className="num big">{money(shares[p.id] || 0)}</b></div>
-            {p.id === payer.id ? <p className="small muted">Paid the bill</p>
-              : valid && (shares[p.id] || 0) > 0 ? <PayQR mobile={mobile} amount={shares[p.id]} who={p.name} payer={payer.name} place={place} />
-              : null}
+        {owing.map((p) => (
+          <li key={p.id} className="owe" style={{ ['--pc' as string]: p.color }}>
+            <div className="line"><span className="row gap12"><Avatar p={p} size={44} /><b>{p.name}</b></span><b className="num big">{money(shares[p.id])}</b></div>
+            <PayQR mobile={payee.mobile} amount={shares[p.id]} who={p.name} payTo={payTo} place={place} />
           </li>
         ))}
       </ul>
-      {shares._ > 0 && <p className="note warn"><span className="num">{money(shares._)}</span> is still unassigned.</p>}
-      {valid && owing.length > 1 && (
-        <div className="card">
-          <div className="line"><b className="row gap8"><Users size={18} /> Send to the group</b></div>
-          <ShareRow make={() => makeCard(owing.map((p) => ({ name: p.name, amount: shares[p.id] })), { mobile, payer: payer.name, place })} text={summary} file="WeSplit-group.png" />
+      <p className="center muted small">Your share: <b className="num">{money(shares[me.id] || 0)}</b></p>
+      {shares._ > 0 && <p className="note warn center"><span className="num">{money(shares._)}</span> is still unassigned.</p>}
+      {owing.length > 1 && (
+        <div className="group-share">
+          <span className="row gap8"><Users size={18} /> Send to the group</span>
+          <ShareRow make={() => makeCard(owing.map((p) => ({ name: p.name, amount: shares[p.id] })), { mobile: payee.mobile, payTo, place })} text={summary} file="WeSplit-group.png" />
         </div>
       )}
       <button className="btn primary" onClick={async () => { try { await navigator.clipboard.writeText(summary); notify({ msg: 'Summary copied' }); } catch { notify({ msg: "Couldn't copy. Try again." }); } }}><Copy size={18} /> Copy summary</button>
@@ -395,8 +430,17 @@ function SettleStep({ bill, up, notify, shares, total, mobile, setMobile }: { bi
   );
 }
 
-const shareText = (who: string, place: string, amount: number, payer: string, mobile: string) =>
-  `Hi ${who}, your share for ${place} is ${money(amount)}. Scan to PayNow ${payer} (${normalizeMobile(mobile)}).`;
+function Celebrate({ colors }: { colors: string[] }) {
+  const dots = Array.from({ length: 18 }, (_, i) => { const a = (i / 18) * Math.PI * 2; const r = 70 + (i % 3) * 26; return { x: Math.cos(a) * r, y: Math.sin(a) * r * 0.7 - 20, c: colors[i % colors.length], s: 6 + (i % 3) * 3, d: (i % 4) * 30 }; });
+  return (
+    <div className="celebrate" aria-hidden="true">
+      {dots.map((d, i) => <i key={i} style={{ ['--x' as string]: d.x + 'px', ['--y' as string]: d.y + 'px', background: d.c, width: d.s, height: d.s, animationDelay: d.d + 'ms' }} />)}
+    </div>
+  );
+}
+
+const shareText = (who: string, place: string, amount: number, payTo: string, mobile: string) =>
+  `Hi ${who}, your share for ${place} is ${money(amount)}. Scan to PayNow ${payTo === fmtSG(mobile) ? fmtSG(mobile) : `${payTo} (${fmtSG(mobile)})`}.`;
 const waLink = (t: string) => 'https://wa.me/?text=' + encodeURIComponent(t);
 const tgLink = (t: string) => 'https://t.me/share/url?url=' + encodeURIComponent(APP_URL) + '&text=' + encodeURIComponent(t);
 const safe = (s: string) => s.replace(/[^\w-]+/g, '_');
@@ -405,7 +449,7 @@ type Entry = { name: string; amount: number };
 function fit(c: CanvasRenderingContext2D, t: string, w: number) { while (t.length > 3 && c.measureText(t).width > w) t = t.slice(0, -2) + '…'; return t; }
 
 // Share card PNG in the app's brand: white card, hairline border, ink QR, brand accent.
-async function makeCard(list: Entry[], o: { mobile: string; payer: string; place: string }): Promise<Blob> {
+async function makeCard(list: Entry[], o: { mobile: string; payTo: string; place: string }): Promise<Blob> {
   const W = 720, CH = 860, PAD = 40, BR = '#0B7A5A', INK = '#0F1A17', MUT = '#4B5753', LINE = '#E3E8E6';
   const F = getComputedStyle(document.body).fontFamily || 'system-ui, sans-serif';
   const cv = document.createElement('canvas');
@@ -429,8 +473,8 @@ async function makeCard(list: Entry[], o: { mobile: string; payer: string; place
     const qr = document.createElement('canvas');
     await QRCode.toCanvas(qr, paynowPayload({ mobile: o.mobile, amount: e.amount, ref: 'WeSplit ' + e.name }), { margin: 1, width: 460, color: { dark: INK } });
     c.drawImage(qr, (W - 460) / 2, y + 190, 460, 460);
-    c.font = `600 28px ${F}`; c.fillStyle = BR; c.fillText(fit(c, `PayNow to ${o.payer}`, W - 4 * PAD), W / 2, y + 712);
-    c.font = `500 24px ${F}`; c.fillStyle = MUT; c.fillText(normalizeMobile(o.mobile) || '', W / 2, y + 752);
+    c.font = `600 28px ${F}`; c.fillStyle = BR; c.fillText(fit(c, `PayNow to ${o.payTo}`, W - 4 * PAD), W / 2, y + 712);
+    c.font = `500 24px ${F}`; c.fillStyle = MUT; c.fillText(o.payTo === fmtSG(o.mobile) ? '' : fmtSG(o.mobile), W / 2, y + 752);
     c.fillText('Scan with any Singapore banking app', W / 2, y + 800);
     c.textAlign = 'left';
     y += CH + 24;
@@ -470,7 +514,7 @@ function ShareRow({ make, text, file }: { make: () => Promise<Blob>; text: strin
   );
 }
 
-function PayQR({ mobile, amount, who, payer, place }: { mobile: string; amount: number; who: string; payer: string; place: string }) {
+function PayQR({ mobile, amount, who, payTo, place }: { mobile: string; amount: number; who: string; payTo: string; place: string }) {
   const [src, setSrc] = useState('');
   const [show, setShow] = useState(false);
   useEffect(() => {
@@ -487,7 +531,7 @@ function PayQR({ mobile, amount, who, payer, place }: { mobile: string; amount: 
       )}
       <div className="share">
         {!show && <button className="chip-btn" onClick={() => setShow(true)}><QrCode size={16} /> Show QR</button>}
-        <ShareRow make={() => makeCard([{ name: who, amount }], { mobile, payer, place })} text={shareText(who, place, amount, payer, mobile)} file={`WeSplit-${safe(who)}.png`} />
+        <ShareRow make={() => makeCard([{ name: who, amount }], { mobile, payTo, place })} text={shareText(who, place, amount, payTo, mobile)} file={`WeSplit-${safe(who)}.png`} />
       </div>
     </>
   );
