@@ -7,9 +7,11 @@ import { Mark } from '@/components/brand';
 import { History as HistoryIc, CircleCheck, Circle, Bell, UserRound, Mail, LogOut, Cloud, CloudOff } from 'lucide-react';
 import { supa } from '@/lib/supabase';
 import { syncAll } from '@/lib/sync';
+import { createShare, updateShare, revokeShare, shareUrl, snapshotOf, type ShareRef } from '@/lib/share';
+import { Link2, Link2Off } from 'lucide-react';
 import type { User } from '@supabase/supabase-js';
 
-type Rec = { updatedAt?: number; id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; people: { id: string; name: string; color: string; share: number; paid: boolean }[] };
+type Rec = { updatedAt?: number; items?: { name: string; qty: number | null; price: number; who: string[] }[]; share?: ShareRef; id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; people: { id: string; name: string; color: string; share: number; paid: boolean }[] };
 type Friend = { name: string; color: string; count: number };
 const load = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } };
 
@@ -100,6 +102,22 @@ export default function Home() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => { if (!user || !loaded) return; clearTimeout(st.current); st.current = window.setTimeout(runSync, 1200); }, [user, loaded, history, friends, payee, runSync]);
+  // Keep public share links in step with the bill (paid status, edits). Retries on the next change if offline.
+  const shareT = useRef(0);
+  useEffect(() => {
+    if (!loaded) return;
+    clearTimeout(shareT.current);
+    shareT.current = window.setTimeout(async () => {
+      const sigs: Record<string, string> = load('ws-share-sig', {});
+      for (const r of history) {
+        if (!r.share) continue;
+        const sig = JSON.stringify(snapshotOf(r));
+        if (sigs[r.share.id] === sig) continue;
+        try { await updateShare(r.share, r); sigs[r.share.id] = sig; } catch {}
+      }
+      localStorage.setItem('ws-share-sig', JSON.stringify(sigs));
+    }, 800);
+  }, [history, loaded]);
   useEffect(() => { const on = () => runSync(), off = () => setSync('off'); addEventListener('online', on); addEventListener('offline', off); return () => { removeEventListener('online', on); removeEventListener('offline', off); }; }, [runSync]);
 
   useEffect(() => {
@@ -127,7 +145,7 @@ export default function Home() {
         for (const p of r.people.slice(1)) { const f = out.find((x) => x.name.toLowerCase() === p.name.trim().toLowerCase()); if (f) { f.count++; f.color = p.color; } else if (p.name.trim() && !/^Friend \d+$/.test(p.name)) out.push({ name: p.name.trim(), color: p.color, count: 1 }); }
         return out;
       });
-      const merged = { ...r, date: old?.date || r.date, updatedAt: Date.now(), people: r.people.map((p) => ({ ...p, paid: old?.people.find((q) => q.id === p.id)?.paid || false })) };
+      const merged = { ...r, share: old?.share, date: old?.date || r.date, updatedAt: Date.now(), people: r.people.map((p) => ({ ...p, paid: old?.people.find((q) => q.id === p.id)?.paid || false })) };
       return [merged, ...h.filter((x) => x.id !== r.id)];
     });
   }, []);
@@ -182,7 +200,7 @@ export default function Home() {
           </div>
         ) : (view || step > 0) && <span className="title">{view ? 'History' : STEPS[step]}</span>}
         <div className="row gap4">
-          {supa() && <button className={'icon-btn acct' + (user ? ' in' : '')} aria-label={user ? 'Account' : 'Sign in'} onClick={() => setAcct(true)}>{user ? (user.email || '?')[0].toUpperCase() : <UserRound size={18} />}</button>}
+          {loaded && supa() && <button className={'icon-btn acct' + (user ? ' in' : '')} aria-label={user ? 'Account' : 'Sign in'} onClick={() => setAcct(true)}>{user ? (user.email || '?')[0].toUpperCase() : <UserRound size={18} />}</button>}
           {!view && bill.items.length > 0 && <button className="icon-btn" aria-label="New bill" onClick={newBill}><RotateCcw size={18} /></button>}
           <button className="icon-btn" aria-label={theme === 'dark' ? 'Light mode' : 'Dark mode'} onClick={toggleTheme}>{theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}</button>
         </div>
@@ -555,7 +573,7 @@ function SettleStep({ bill, notify, shares, total, payee, setPayee, saveRec }: {
   const sig = JSON.stringify([bill.id, bill.people, shares, total, payee, bill.merchant]);
   useEffect(() => {
     if (!normalizeMobile(payee.mobile) || !bill.id || bill.people.length < 2 || !bill.items.length) return;
-    saveRec({ id: bill.id, place: bill.merchant || 'Bill', date: new Date().toISOString(), total, mode: MODES[bill.mode as Mode].label, payee, people: bill.people.map((p) => ({ id: p.id, name: p.name, color: p.color, share: shares[p.id] || 0, paid: false })) });
+    saveRec({ id: bill.id, place: bill.merchant || 'Bill', date: new Date().toISOString(), total, mode: MODES[bill.mode as Mode].label, payee, items: bill.items.map((it) => ({ name: it.name, qty: it.qty, price: it.price, who: Object.keys(bill.assign[it.id] || {}).filter((k) => (bill.assign[it.id][k] || 0) > 0) })), people: bill.people.map((p) => ({ id: p.id, name: p.name, color: p.color, share: shares[p.id] || 0, paid: false })) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sig]);
   const [editing, setEditing] = useState(false);
@@ -752,6 +770,16 @@ function BillDetail({ rec, setHistory, notify, close }: { rec?: Rec; setHistory:
   const payTo = rec.payee.name || fmtSG(rec.payee.mobile);
   const toggle = (pid: string) => { buzz(12); setHistory((h) => h.map((r) => (r.id !== rec.id ? r : { ...r, updatedAt: Date.now(), people: r.people.map((p) => (p.id === pid ? { ...p, paid: !p.paid } : p)) }))); };
   const del = () => { let snap: Rec[] = []; setHistory((h) => { snap = h; return h.filter((r) => r.id !== rec.id); }); close(); notify({ msg: 'Bill deleted', undo: () => setHistory(() => snap) }); };
+  const ensureLink = async (): Promise<string | null> => {
+    if (rec.share) return shareUrl(rec.share.id);
+    if (!navigator.onLine) { notify({ msg: 'Connect to the internet to make a link.' }); return null; }
+    try {
+      const s = await createShare(rec);
+      const sigs = load<Record<string, string>>('ws-share-sig', {}); sigs[s.id] = JSON.stringify(snapshotOf(rec)); localStorage.setItem('ws-share-sig', JSON.stringify(sigs));
+      setHistory((h) => h.map((r) => (r.id === rec.id ? { ...r, share: s, updatedAt: Date.now() } : r)));
+      return shareUrl(s.id);
+    } catch (e) { notify({ msg: (e as Error).message }); return null; }
+  };
   return (
     <section className="stack">
       {others.length > 0 && paid === others.length && <Celebrate colors={rec.people.map((p) => p.color)} />}
@@ -766,18 +794,60 @@ function BillDetail({ rec, setHistory, notify, close }: { rec?: Rec; setHistory:
             <div className="line"><span className="row gap12"><Avatar p={p} size={44} /><b>{p.name}</b></span><b className="num big">{money(p.share)}</b></div>
             <div className="share">
               <button className={'chip-btn paid-btn' + (p.paid ? ' on' : '')} aria-pressed={p.paid} onClick={() => toggle(p.id)}>{p.paid ? <CircleCheck size={16} /> : <Circle size={16} />} {p.paid ? 'Paid' : 'Mark as paid'}</button>
-              {!p.paid && <NudgeRow rec={rec} who={p.name} amount={p.share} payTo={payTo} />}
+              {!p.paid && <NudgeRow rec={rec} who={p.name} amount={p.share} payTo={payTo} ensure={ensureLink} />}
             </div>
           </li>
         ))}
       </ul>
+      <ShareLink rec={rec} ensure={ensureLink} notify={notify} revoke={async () => {
+        try { await revokeShare(rec.share!); setHistory((h) => h.map((r) => (r.id === rec.id ? { ...r, share: undefined, updatedAt: Date.now() } : r))); notify({ msg: 'Link turned off' }); }
+        catch { notify({ msg: "Couldn't turn off the link. Check your connection." }); }
+      }} />
       <button className="btn text danger" onClick={del}><Trash2 size={18} /> Delete bill</button>
     </section>
   );
 }
 
-function NudgeRow({ rec, who, amount, payTo }: { rec: Rec; who: string; amount: number; payTo: string }) {
+function TextShare({ text, url, label = 'Share' }: { text: string; url: string; label?: string }) {
+  const native = typeof navigator !== 'undefined' && !!navigator.share;
+  const full = text + ' ' + url;
+  return (
+    <div className="share">
+      <a className="chip-btn" href={'https://wa.me/?text=' + encodeURIComponent(full)} target="_blank" rel="noopener" aria-label="Send on WhatsApp"><MessageCircle size={16} /> WhatsApp</a>
+      <a className="chip-btn" href={'https://t.me/share/url?url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(text)} target="_blank" rel="noopener" aria-label="Send on Telegram"><Send size={16} /> Telegram</a>
+      {native && <button className="chip-btn" onClick={() => navigator.share({ text, url }).catch(() => {})}><Share2 size={16} /> {label}</button>}
+    </div>
+  );
+}
+
+function ShareLink({ rec, ensure, revoke, notify }: { rec: Rec; ensure: () => Promise<string | null>; revoke: () => void; notify: (t: Toast) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [sure, setSure] = useState(false);
+  if (!rec.share) return (
+    <button className="btn ghost" disabled={busy} onClick={async () => { setBusy(true); await ensure(); setBusy(false); }}><Link2 size={18} /> {busy ? 'Making link…' : 'Share bill link'}</button>
+  );
+  const url = shareUrl(rec.share.id);
+  const host = rec.payee.name ? `${rec.payee.name} here! ` : '';
+  return (
+    <div className="linkbox">
+      <b><Link2 size={16} /> Anyone with this link can see the bill</b>
+      <span className="url">{url.replace(/^https?:\/\//, '')}</span>
+      <small className="muted">Friends tap their name to see their share and your PayNow QR. Paid status updates automatically.</small>
+      <TextShare text={`${host}Here's the split for ${rec.place} (${money(rec.total)}). Tap your name to see what you owe:`} url={url} />
+      <div className="share">
+        <button className="chip-btn" onClick={async () => { await navigator.clipboard.writeText(url).catch(() => {}); notify({ msg: 'Link copied' }); }}><Copy size={16} /> Copy link</button>
+        {!sure ? <button className="chip-btn danger" onClick={() => setSure(true)}><Link2Off size={16} /> Stop sharing</button>
+          : <button className="chip-btn danger" onClick={() => { setSure(false); revoke(); }}><Link2Off size={16} /> Tap again to turn off</button>}
+      </div>
+    </div>
+  );
+}
+
+function NudgeRow({ rec, who, amount, payTo, ensure }: { rec: Rec; who: string; amount: number; payTo: string; ensure: () => Promise<string | null> }) {
+  const [url, setUrl] = useState<string | null>(rec.share ? shareUrl(rec.share.id) : null);
   const [open, setOpen] = useState(false);
-  if (!open) return <button className="chip-btn" onClick={() => setOpen(true)}><Bell size={16} /> Nudge</button>;
-  return <ShareRow make={() => makeCard([{ name: who, amount }], { mobile: rec.payee.mobile, payTo, place: rec.place })} text={'Friendly reminder: ' + shareText(who, rec.place, amount, payTo, rec.payee.mobile)} file={`WeSplit-${safe(who)}.png`} />;
+  const [busy, setBusy] = useState(false);
+  if (!open) return <button className="chip-btn" disabled={busy} onClick={async () => { setBusy(true); const u = await ensure(); setBusy(false); if (u) { setUrl(u); setOpen(true); } }}><Bell size={16} /> {busy ? 'Nudge…' : 'Nudge'}</button>;
+  const text = `Hey ${who}! Gentle nudge for ${rec.place} 🙏 Your share is ${money(amount)}. PayNow ${payTo === fmtSG(rec.payee.mobile) ? fmtSG(rec.payee.mobile) : `${payTo} (${fmtSG(rec.payee.mobile)})`} or tap your name here for the QR:`;
+  return <TextShare text={text} url={url!} label="More" />;
 }
