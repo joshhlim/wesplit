@@ -1,6 +1,7 @@
 import './globals.css';
 import type { Metadata, Viewport } from 'next';
 import { Nunito } from 'next/font/google';
+import splash from '@/components/splash.json';
 
 const geist = Nunito({ subsets: ['latin'], display: 'swap', variable: '--font' });
 
@@ -24,6 +25,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en-SG" className={geist.variable} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: "try{var t=localStorage.getItem('ws-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.dataset.theme=t}catch(e){}" }} />
+        {splash.map((s) => <link key={s.url} rel="apple-touch-startup-image" href={s.url} media={s.media} />)}
       </head>
       <body>{children}</body>
     </html>

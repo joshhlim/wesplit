@@ -9,16 +9,38 @@ const MODEL = process.env.ASK_MODEL || 'gemini-3.5-flash-lite';
 const MAX_BYTES = 4 * 1024 * 1024;
 const TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
 
-// Best-effort per-instance rate limit (no storage).
-const WINDOW = 10 * 60_000, PER_IP = 15;
+// Abuse protection without paid services (per server instance; Vercel may run several):
+// per-IP sliding windows, a per-instance daily cap, same-origin check and a small proof of work.
+const PER_10MIN = 8, PER_DAY_IP = 40, DAILY_CAP = 300;
 const hits = new Map<string, number[]>();
-function limited(ip: string) {
-  const now = Date.now();
-  const h = (hits.get(ip) || []).filter((t) => now - t < WINDOW);
-  if (h.length >= PER_IP) { hits.set(ip, h); return true; }
-  h.push(now); hits.set(ip, h);
+let day = '', dayCount = 0;
+const seenPow = new Map<string, number>();
+function limited(ip: string): string | null {
+  const now = Date.now(), today = new Date().toISOString().slice(0, 10);
+  if (today !== day) { day = today; dayCount = 0; }
+  if (dayCount >= DAILY_CAP) return "WeSplit has hit today's scan limit. Please try again tomorrow, or enter items yourself.";
+  const h = (hits.get(ip) || []).filter((t) => now - t < 86_400_000);
+  if (h.filter((t) => now - t < 600_000).length >= PER_10MIN) { hits.set(ip, h); return 'Too many scans in a row. Please wait a few minutes and try again.'; }
+  if (h.length >= PER_DAY_IP) { hits.set(ip, h); return "You've reached today's scan limit. You can still enter items yourself."; }
+  h.push(now); hits.set(ip, h); dayCount++;
   if (hits.size > 5000) hits.clear();
-  return false;
+  return null;
+}
+function sameOrigin(req: Request) {
+  const origin = req.headers.get('origin');
+  const host = req.headers.get('x-forwarded-host') || req.headers.get('host');
+  if (origin) { try { return new URL(origin).host === host; } catch { return false; } }
+  return req.headers.get('sec-fetch-site') === 'same-origin';
+}
+async function powOk(pow: string, size: number) {
+  const [ts, n] = pow.split('.');
+  const t = Number(ts);
+  if (!t || !n || Math.abs(Date.now() - t) > 5 * 60_000 || seenPow.has(pow)) return false;
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${ts}.${n}.${size}`)));
+  if (!(h[0] === 0 && h[1] < 4)) return false;
+  seenPow.set(pow, t);
+  if (seenPow.size > 10000) { const cut = Date.now() - 5 * 60_000; for (const [k, v] of seenPow) if (v < cut) seenPow.delete(k); }
+  return true;
 }
 const json = (status: number, body: unknown) =>
   Response.json(body, { status, headers: { 'cache-control': 'no-store' } });
@@ -52,12 +74,16 @@ function isRateLimit(e: unknown) {
 
 export async function POST(req: Request) {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() || 'x';
-  if (limited(ip)) return json(429, { error: BUSY });
-  let file: File | null = null;
-  try { const f = (await req.formData()).get('image'); if (f instanceof File) file = f; } catch {}
+  if (!sameOrigin(req)) return json(403, { error: 'Scanning only works from the WeSplit app.' });
+  if (Number(req.headers.get('content-length') || 0) > MAX_BYTES + 64 * 1024) return json(413, { error: 'That photo is too large. Try one under 4 MB.' });
+  let file: File | null = null, pow = '';
+  try { const fd = await req.formData(); const f = fd.get('image'); if (f instanceof File) file = f; pow = String(fd.get('pow') || ''); } catch {}
   if (!file) return json(400, { error: 'Please upload an image.' });
   if (!TYPES.includes(file.type)) return json(415, { error: 'Please upload a photo (JPG, PNG or WebP).' });
-  if (file.size > MAX_BYTES) return json(413, { error: 'Image is too large (max 4 MB).' });
+  if (file.size > MAX_BYTES) return json(413, { error: 'That photo is too large. Try one under 4 MB.' });
+  if (!(await powOk(pow, file.size))) return json(400, { error: 'Please refresh WeSplit and try again.' });
+  const lim = limited(ip);
+  if (lim) return json(429, { error: lim });
   const data = new Uint8Array(await file.arrayBuffer());
 
   const run = () => generateText({
@@ -83,7 +109,8 @@ export async function POST(req: Request) {
     } catch (e) {
       console.error('scan error', attempt, (e as Error)?.message);
       if (isRateLimit(e)) return json(429, { error: BUSY });
-      if (attempt === 0 && transient(e)) continue;
+      if (attempt === 0 && transient(e)) { await new Promise((r) => setTimeout(r, 900)); continue; }
+      if (/high demand|overloaded|unavailable/i.test(String((e as Error)?.message))) return json(503, { error: BUSY });
       return json(502, { error: 'Could not read the receipt. Please try again.' });
     }
   }

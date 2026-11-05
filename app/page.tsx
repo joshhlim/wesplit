@@ -4,12 +4,17 @@ import QRCode from 'qrcode';
 import { Camera, ChevronLeft, Plus, Minus, X, Check, Ellipsis, Sun, Moon, Share2, Download, Copy, Trash2, Lock, Receipt, CircleAlert, RotateCcw, MessageCircle, Send, PenLine, WifiOff, ArrowRight, QrCode, Users } from 'lucide-react';
 import { MODES, detectMode, split, itemsSum, paynowPayload, normalizeMobile } from '@/lib/split.mjs';
 import { Mark } from '@/components/brand';
+import { History as HistoryIc, CircleCheck, Circle, Bell } from 'lucide-react';
+
+type Rec = { id: string; place: string; date: string; total: number; mode: string; payee: { mobile: string; name: string }; people: { id: string; name: string; color: string; share: number; paid: boolean }[] };
+type Friend = { name: string; color: string; count: number };
+const load = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } };
 
 type Item = { id: string; name: string; qty: number | null; price: number };
 type Person = { id: string; name: string; color: string };
 type Assign = Record<string, Record<string, number>>;
 type Mode = keyof typeof MODES;
-type Bill = { merchant: string | null; total: number | null; items: Item[]; people: Person[]; assign: Assign; mode: Mode; payer: string };
+type Bill = { id?: string; merchant: string | null; total: number | null; items: Item[]; people: Person[]; assign: Assign; mode: Mode; payer: string };
 type Up = (f: (b: Bill) => Bill) => void;
 type Toast = { msg: string; undo?: () => void } | null;
 
@@ -23,7 +28,17 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 const money = (n: number) => 'S$' + (Math.round((n || 0) * 100) / 100).toFixed(2);
 const ini = (n: string) => { if (n.trim().toLowerCase() === 'you') return 'You'; const w = n.trim().split(/\s+/); return ((w.length > 1 ? w.map((x) => x[0]).join('') : n).slice(0, 2).toUpperCase()) || '?'; };
 const buzz = (ms = 10) => { try { navigator.vibrate?.(ms); } catch {} };
-const empty = (): Bill => ({ merchant: null, total: null, items: [], people: [{ id: 'me', name: 'You', color: COLORS[0] }], assign: {}, mode: 'sg', payer: '' });
+const empty = (): Bill => ({ id: uid(), merchant: null, total: null, items: [], people: [{ id: 'me', name: 'You', color: COLORS[0] }], assign: {}, mode: 'sg', payer: '' });
+
+// Lightweight proof of work: find a nonce so sha256("ts.nonce.size") starts with 14 zero bits (~16k hashes).
+async function proofOfWork(size: number) {
+  const ts = Date.now(), enc = new TextEncoder();
+  for (let n = 0; n < 2_000_000; n++) {
+    const h = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(`${ts}.${n}.${size}`)));
+    if (h[0] === 0 && h[1] < 4) return `${ts}.${n}`;
+  }
+  return `${ts}.0`;
+}
 
 async function shrink(file: File): Promise<Blob> {
   if (file.size < 1.5e6 && /jpeg|png|webp/.test(file.type)) return file;
@@ -45,12 +60,16 @@ export default function Home() {
   const [payee, setPayee] = useState<Payee>({ mobile: '', name: '' });
   const [theme, setTheme] = useState('light');
   const [toast, setToastState] = useState<Toast>(null);
+  const [history, setHistory] = useState<Rec[]>([]);
+  const [friends, setFriends] = useState<Friend[]>([]);
+  const [view, setView] = useState<null | 'history' | string>(null);
   const tt = useRef(0);
 
   useEffect(() => {
     try {
       const b = localStorage.getItem('ws-bill');
-      if (b) { const x: Bill = JSON.parse(b); if (x.people?.[0] && x.people[0].name === 'Me') x.people[0].name = 'You'; if (!x.people?.length) x.people = empty().people; setBill(x); }
+      setHistory(load('ws-history', [])); setFriends(load('ws-friends', []));
+      if (b) { const x: Bill = JSON.parse(b); if (!x.id) x.id = uid(); if (x.people?.[0] && x.people[0].name === 'Me') x.people[0].name = 'You'; if (!x.people?.length) x.people = empty().people; setBill(x); }
       const pe = localStorage.getItem('ws-payee'); if (pe) setPayee(JSON.parse(pe));
       else { const m = localStorage.getItem('ws-mobile'); if (m && normalizeMobile(m)) setPayee({ mobile: normalizeMobile(m)!, name: '' }); }
       const s = localStorage.getItem('ws-step'); if (s) setStep(+s);
@@ -60,18 +79,34 @@ export default function Home() {
   }, []);
   useEffect(() => { if (loaded) { localStorage.setItem('ws-bill', JSON.stringify(bill)); localStorage.setItem('ws-step', String(step)); } }, [bill, step, loaded]);
   useEffect(() => { if (loaded) localStorage.setItem('ws-payee', JSON.stringify(payee)); }, [payee, loaded]);
+  useEffect(() => { if (loaded) localStorage.setItem('ws-history', JSON.stringify(history)); }, [history, loaded]);
+  useEffect(() => { if (loaded) localStorage.setItem('ws-friends', JSON.stringify(friends)); }, [friends, loaded]);
+  useEffect(() => { if ('serviceWorker' in navigator && location.hostname !== 'localhost') navigator.serviceWorker.register('/sw.js').catch(() => {}); }, []);
+  const saveRec = useCallback((r: Rec) => {
+    setHistory((h) => {
+      const old = h.find((x) => x.id === r.id);
+      if (!old) setFriends((fs) => {
+        const out = [...fs];
+        for (const p of r.people.slice(1)) { const f = out.find((x) => x.name.toLowerCase() === p.name.trim().toLowerCase()); if (f) { f.count++; f.color = p.color; } else if (p.name.trim() && !/^Friend \d+$/.test(p.name)) out.push({ name: p.name.trim(), color: p.color, count: 1 }); }
+        return out;
+      });
+      const merged = { ...r, date: old?.date || r.date, people: r.people.map((p) => ({ ...p, paid: old?.people.find((q) => q.id === p.id)?.paid || false })) };
+      return [merged, ...h.filter((x) => x.id !== r.id)];
+    });
+  }, []);
 
   const toggleTheme = () => { const t = theme === 'dark' ? 'light' : 'dark'; setTheme(t); document.documentElement.dataset.theme = t; localStorage.setItem('ws-theme', t); };
   const up: Up = useCallback((f) => setBill((b) => f(structuredClone(b))), []);
-  const notify = useCallback((t: Toast) => { clearTimeout(tt.current); setToastState(t); if (t) tt.current = window.setTimeout(() => setToastState(null), 5000); }, []);
-  const go = (n: number) => { setDir(n >= step ? 1 : -1); setStep(n); window.scrollTo({ top: 0 }); };
+  const notify = useCallback((t: Toast) => { clearTimeout(tt.current); setToastState(t); if (t) tt.current = window.setTimeout(() => setToastState(null), t.undo ? 4000 : 2500); }, []);
+  const go = (n: number) => { setView(null); setDir(n >= step ? 1 : -1); setStep(n); window.scrollTo({ top: 0 }); };
 
   async function scan(file: File) {
     setErr('');
     if (!navigator.onLine) { setErr("You're offline. Connect to the internet to scan, or enter items yourself."); return; }
     setBusy(true);
     try {
-      const fd = new FormData(); fd.append('image', await shrink(file), 'receipt.jpg');
+      const img = await shrink(file);
+      const fd = new FormData(); fd.append('image', img, 'receipt.jpg'); fd.append('pow', await proofOfWork(img.size));
       const r = await fetch('/api/scan', { method: 'POST', body: fd });
       const d = await r.json().catch(() => ({ error: 'Something went wrong. Please try again.' }));
       if (!r.ok) throw new Error(d.error);
@@ -100,14 +135,23 @@ export default function Home() {
   return (
     <main className={step === 2 ? 'has-bar' : ''}>
       <header className="top">
-        {step > 0 ? <button className="icon-btn" aria-label="Back" onClick={() => go(step - 1)}><ChevronLeft size={22} /></button>
-          : <span className="brand"><Mark size={28} /><b>WeSplit</b></span>}
-        {step > 0 && <span className="title">{STEPS[step]}</span>}
+        {view ? <button className="icon-btn" aria-label="Back" onClick={() => setView(view === 'history' ? null : 'history')}><ChevronLeft size={22} /></button>
+          : step > 0 ? <button className="icon-btn" aria-label="Back" onClick={() => go(step - 1)}><ChevronLeft size={22} /></button>
+          : <span className="brand"><Mark size={28} />{!toast && <b>WeSplit</b>}</span>}
+        {toast ? (
+          <div className="toast" role="status">
+            <span>{toast.msg}</span>
+            {toast.undo && <button onClick={() => { toast.undo!(); notify(null); }}>Undo</button>}
+          </div>
+        ) : (view || step > 0) && <span className="title">{view ? 'History' : STEPS[step]}</span>}
         <div className="row gap4">
           {bill.items.length > 0 && <button className="icon-btn" aria-label="New bill" onClick={newBill}><RotateCcw size={18} /></button>}
           <button className="icon-btn" aria-label={theme === 'dark' ? 'Light mode' : 'Dark mode'} onClick={toggleTheme}>{theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}</button>
         </div>
       </header>
+      {view ? <div className="screen fwd">{view === 'history'
+        ? <HistoryList history={history} open={(id) => setView(id)} />
+        : <BillDetail rec={history.find((r) => r.id === view)} setHistory={setHistory} notify={notify} close={() => setView('history')} />}</div> : <>
       <nav className="steps" aria-label="Steps">
         {STEPS.map((s, i) => (
           <button key={s} className={'step' + (i === step ? ' on' : '') + (i < step ? ' done' : '')} disabled={!can(i)} aria-current={i === step ? 'step' : undefined} onClick={() => go(i)}>
@@ -117,23 +161,17 @@ export default function Home() {
       </nav>
 
       <div key={step} className={'screen ' + (dir > 0 ? 'fwd' : 'back')}>
-        {step === 0 && <ScanStep busy={busy} err={err} onFile={scan} hasBill={bill.items.length > 0} resume={() => go(2)}
+        {step === 0 && <ScanStep busy={busy} err={err} onFile={scan} hasBill={bill.items.length > 0} resume={() => go(2)} openHistory={() => setView('history')} owed={history.reduce((s, r) => s + r.people.slice(1).filter((p) => !p.paid).reduce((a, p) => a + Math.round(p.share * 100), 0), 0) / 100}
           onManual={() => { up((b) => ({ ...b, merchant: null, total: null, assign: {}, items: [{ id: uid(), name: 'Item 1', qty: 1, price: 0 }] })); go(1); }} />}
-        {step === 1 && <PeopleStep bill={bill} up={up} notify={notify} next={() => go(2)} />}
+        {step === 1 && <PeopleStep bill={bill} up={up} notify={notify} next={() => go(2)} friends={friends} setFriends={setFriends} />}
         {step === 2 && <AssignStep bill={bill} up={up} notify={notify} next={() => go(3)} detected={detected} total={result.total} shares={result.shares} />}
-        {step === 3 && <SettleStep bill={bill} notify={notify} shares={result.shares} total={result.total} payee={payee} setPayee={setPayee} />}
-      </div>
+        {step === 3 && <SettleStep bill={bill} notify={notify} shares={result.shares} total={result.total} payee={payee} setPayee={setPayee} saveRec={saveRec} />}
+      </div></>}
 
       <footer className="foot">
         <span><Lock size={12} /> Your data stays on your phone.</span>
         <a href={REPO} target="_blank" rel="noopener">Source on GitHub</a>
       </footer>
-      {toast && (
-        <div className="toast" role="status">
-          <span>{toast.msg}</span>
-          {toast.undo && <button onClick={() => { toast.undo!(); notify(null); }}>Undo</button>}
-        </div>
-      )}
     </main>
   );
 }
@@ -153,7 +191,7 @@ function Stepper({ value, set, min = 0, max = 20, label }: { value: number; set:
 }
 
 /* ---------- 1. Scan ---------- */
-function ScanStep({ busy, err, onFile, onManual, hasBill, resume }: { busy: boolean; err: string; onFile: (f: File) => void; onManual: () => void; hasBill: boolean; resume: () => void }) {
+function ScanStep({ busy, err, onFile, onManual, hasBill, resume, openHistory, owed }: { busy: boolean; err: string; onFile: (f: File) => void; onManual: () => void; hasBill: boolean; resume: () => void; openHistory: () => void; owed: number }) {
   const ref = useRef<HTMLInputElement>(null);
   if (busy) return (
     <section className="stack">
@@ -182,12 +220,18 @@ function ScanStep({ busy, err, onFile, onManual, hasBill, resume }: { busy: bool
       {err && <div className="alert" role="alert">{/offline/i.test(err) ? <WifiOff size={18} /> : <CircleAlert size={18} />}<span>{err}</span></div>}
       <button className="btn ghost" onClick={onManual}><PenLine size={18} /> Enter items yourself</button>
       {hasBill && <button className="btn ghost" onClick={resume}>Continue current bill <ArrowRight size={18} /></button>}
+      <button className="btn ghost" onClick={openHistory}><HistoryIc size={18} /> History{owed > 0 && <span className="pill-num num">{money(owed)} owed</span>}</button>
     </section>
   );
 }
 
 /* ---------- 2. People ---------- */
-function PeopleStep({ bill, up, notify, next }: { bill: Bill; up: Up; notify: (t: Toast) => void; next: () => void }) {
+function PeopleStep({ bill, up, notify, next, friends, setFriends }: { bill: Bill; up: Up; notify: (t: Toast) => void; next: () => void; friends: Friend[]; setFriends: (f: Friend[] | ((f: Friend[]) => Friend[])) => void }) {
+  const [manage, setManage] = useState(false);
+  const inBill = new Set(bill.people.map((p) => p.name.trim().toLowerCase()));
+  const sugg = [...friends].sort((a, b) => b.count - a.count).filter((f) => !inBill.has(f.name.toLowerCase()));
+  const addFriend = (f: Friend) => { buzz(10); up((b) => { if (b.people.length >= 10) return b; const used = new Set(b.people.map((p) => p.color)); b.people.push({ id: uid(), name: f.name, color: used.has(f.color) ? COLORS.find((c) => !used.has(c)) || f.color : f.color }); return b; }); };
+  const forget = (f: Friend) => { const snap = friends; setFriends((fs) => fs.filter((x) => x.name !== f.name)); notify({ msg: `Forgot ${f.name}`, undo: () => setFriends(snap) }); };
   const add = () => { buzz(8); up((b) => { const n = b.people.length; if (n >= 10) return b; const used = new Set(b.people.map((p) => p.color)); b.people.push({ id: uid(), name: NAMES.find((x) => !b.people.some((p) => p.name === x)) || `Friend ${n}`, color: COLORS.find((c) => !used.has(c)) || COLORS[n % 10] }); return b; }); };
   const remove = (p: Person) => {
     const snap = structuredClone(bill);
@@ -207,6 +251,18 @@ function PeopleStep({ bill, up, notify, next }: { bill: Bill; up: Up; notify: (t
         ))}
       </ul>
       {bill.people.length < 10 && <button className="btn ghost" onClick={add}><Plus size={18} /> Add person</button>}
+      {(sugg.length > 0 || manage) && (
+        <div className="friends">
+          <div className="row between"><span className="sub">Friends</span><button className="btn text sm-text" onClick={() => setManage((m) => !m)}>{manage ? 'Done' : 'Manage'}</button></div>
+          <div className="fchips">
+            {(manage ? [...friends].sort((a, b) => b.count - a.count) : sugg).map((f) => (
+              <button key={f.name} className={'fchip' + (manage ? ' manage' : '')} style={{ ['--pc' as string]: f.color }} onClick={() => (manage ? forget(f) : addFriend(f))} aria-label={manage ? `Forget ${f.name}` : `Add ${f.name}`}>
+                <span className="av" style={{ background: f.color, width: 32, height: 32, fontSize: 12 }}>{ini(f.name)}</span>{f.name}{manage ? <X size={14} /> : <Plus size={14} />}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
             <button className="btn primary" onClick={next}>Continue</button>
     </section>
   );
@@ -274,7 +330,7 @@ function AssignStep({ bill, up, notify, next, detected, total, shares }: { bill:
                 <span className="price num">{money(it.price)}</span>
                 <button className="icon-btn sm" aria-label={`Edit ${it.name}`} onClick={() => setSheet(it.id)}><Ellipsis size={18} /></button>
               </div>
-              <div className="bubbles" role="group" aria-label={`Who had ${it.name}?`}>
+              <div className={'bubbles' + (bill.people.length >= 7 ? ' scroll' : '')} role="group" aria-label={`Who had ${it.name}?`}>
                 {bill.people.map((p) => {
                   const w = a[p.id] || 0;
                   return (
@@ -382,7 +438,13 @@ function PayMe({ initial, onSave, onCancel }: { initial: Payee; onSave: (p: Paye
   );
 }
 
-function SettleStep({ bill, notify, shares, total, payee, setPayee }: { bill: Bill; notify: (t: Toast) => void; shares: Record<string, number>; total: number; payee: Payee; setPayee: (p: Payee) => void }) {
+function SettleStep({ bill, notify, shares, total, payee, setPayee, saveRec }: { bill: Bill; notify: (t: Toast) => void; shares: Record<string, number>; total: number; payee: Payee; setPayee: (p: Payee) => void; saveRec: (r: Rec) => void }) {
+  const sig = JSON.stringify([bill.id, bill.people, shares, total, payee, bill.merchant]);
+  useEffect(() => {
+    if (!normalizeMobile(payee.mobile) || !bill.id || bill.people.length < 2 || !bill.items.length) return;
+    saveRec({ id: bill.id, place: bill.merchant || 'Bill', date: new Date().toISOString(), total, mode: MODES[bill.mode as Mode].label, payee, people: bill.people.map((p) => ({ id: p.id, name: p.name, color: p.color, share: shares[p.id] || 0, paid: false })) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sig]);
   const [editing, setEditing] = useState(false);
   const me = bill.people[0];
   const valid = normalizeMobile(payee.mobile);
@@ -390,7 +452,7 @@ function SettleStep({ bill, notify, shares, total, payee, setPayee }: { bill: Bi
   const payTo = payee.name || fmtSG(payee.mobile);
   const owing = bill.people.slice(1).filter((p) => (shares[p.id] || 0) > 0);
   const allSet = !shares._;
-  if (!valid || editing) return <PayMe initial={payee} onSave={(p) => { setPayee(p); setEditing(false); notify({ msg: 'Saved. Friends will pay ' + fmtSG(p.mobile) }); }} onCancel={valid ? () => setEditing(false) : undefined} />;
+  if (!valid || editing) return <PayMe initial={payee} onSave={(p) => { setPayee(p); setEditing(false); notify({ msg: 'PayNow number saved' }); }} onCancel={valid ? () => setEditing(false) : undefined} />;
   const summary = [
     `${bill.merchant || 'Bill'}: ${money(total)} (${MODES[bill.mode as Mode].label})`,
     ...owing.map((p) => `${p.name} owes ${money(shares[p.id])}`),
@@ -535,4 +597,74 @@ function PayQR({ mobile, amount, who, payTo, place }: { mobile: string; amount: 
       </div>
     </>
   );
+}
+
+/* ---------- History ---------- */
+const owedOf = (r: Rec) => r.people.slice(1).filter((p) => !p.paid && p.share > 0).reduce((a, p) => a + Math.round(p.share * 100), 0) / 100;
+const fmtDate = (d: string) => new Date(d).toLocaleDateString('en-SG', { day: 'numeric', month: 'short', year: 'numeric' });
+
+function HistoryList({ history, open }: { history: Rec[]; open: (id: string) => void }) {
+  const owed = history.reduce((s, r) => s + Math.round(owedOf(r) * 100), 0) / 100;
+  if (!history.length) return (
+    <section className="stack">
+      <div className="empty"><HistoryIc size={32} /><b>No bills yet</b><span className="muted">Bills you settle will show up here.</span></div>
+    </section>
+  );
+  return (
+    <section className="stack">
+      <div className="hero center"><p className="muted">Owed to you</p><h1 className="num huge">{money(owed)}</h1><p className="muted small">across {history.length} bill{history.length > 1 ? 's' : ''}</p></div>
+      <ul className="hlist">
+        {history.map((r) => {
+          const others = r.people.slice(1).filter((p) => p.share > 0);
+          const paid = others.filter((p) => p.paid).length;
+          return (
+            <li key={r.id}>
+              <button className="hrow" onClick={() => open(r.id)}>
+                <span className="hmain"><b>{r.place}</b><small className="muted">{fmtDate(r.date)} · {paid === others.length ? <span className="ok">All paid</span> : `${paid} of ${others.length} paid`}</small></span>
+                <span className="havs">{others.slice(0, 4).map((p) => <span key={p.id} className={'av' + (p.paid ? ' paid' : '')} style={{ background: p.color, width: 28, height: 28, fontSize: 10 }}>{ini(p.name)}</span>)}</span>
+                <b className="num">{money(owedOf(r))}</b>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function BillDetail({ rec, setHistory, notify, close }: { rec?: Rec; setHistory: (f: (h: Rec[]) => Rec[]) => void; notify: (t: Toast) => void; close: () => void }) {
+  if (!rec) return <section className="stack"><div className="empty"><b>Bill not found</b></div></section>;
+  const others = rec.people.slice(1).filter((p) => p.share > 0);
+  const paid = others.filter((p) => p.paid).length;
+  const payTo = rec.payee.name || fmtSG(rec.payee.mobile);
+  const toggle = (pid: string) => { buzz(12); setHistory((h) => h.map((r) => (r.id !== rec.id ? r : { ...r, people: r.people.map((p) => (p.id === pid ? { ...p, paid: !p.paid } : p)) }))); };
+  const del = () => { let snap: Rec[] = []; setHistory((h) => { snap = h; return h.filter((r) => r.id !== rec.id); }); close(); notify({ msg: 'Bill deleted', undo: () => setHistory(() => snap) }); };
+  return (
+    <section className="stack">
+      {others.length > 0 && paid === others.length && <Celebrate colors={rec.people.map((p) => p.color)} />}
+      <div className="hero center">
+        <p className="muted">{rec.place} · {fmtDate(rec.date)}</p>
+        <h1 className="num huge">{money(owedOf(rec))}</h1>
+        <p className="muted small">{paid === others.length ? 'Everyone has paid' : `${paid} of ${others.length} paid`} · {money(rec.total)} total</p>
+      </div>
+      <ul className="settle">
+        {others.map((p) => (
+          <li key={p.id} className={'owe' + (p.paid ? ' is-paid' : '')} style={{ ['--pc' as string]: p.color }}>
+            <div className="line"><span className="row gap12"><Avatar p={p} size={44} /><b>{p.name}</b></span><b className="num big">{money(p.share)}</b></div>
+            <div className="share">
+              <button className={'chip-btn paid-btn' + (p.paid ? ' on' : '')} aria-pressed={p.paid} onClick={() => toggle(p.id)}>{p.paid ? <CircleCheck size={16} /> : <Circle size={16} />} {p.paid ? 'Paid' : 'Mark as paid'}</button>
+              {!p.paid && <NudgeRow rec={rec} who={p.name} amount={p.share} payTo={payTo} />}
+            </div>
+          </li>
+        ))}
+      </ul>
+      <button className="btn text danger" onClick={del}><Trash2 size={18} /> Delete bill</button>
+    </section>
+  );
+}
+
+function NudgeRow({ rec, who, amount, payTo }: { rec: Rec; who: string; amount: number; payTo: string }) {
+  const [open, setOpen] = useState(false);
+  if (!open) return <button className="chip-btn" onClick={() => setOpen(true)}><Bell size={16} /> Nudge</button>;
+  return <ShareRow make={() => makeCard([{ name: who, amount }], { mobile: rec.payee.mobile, payTo, place: rec.place })} text={'Friendly reminder: ' + shareText(who, rec.place, amount, payTo, rec.payee.mobile)} file={`WeSplit-${safe(who)}.png`} />;
 }
