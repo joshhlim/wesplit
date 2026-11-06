@@ -42,9 +42,16 @@ export async function syncAll(sb: SupabaseClient, uid: string, local: { history:
     if (rows.length) { const { error: e2 } = await sb.from('bill_people').upsert(rows); if (e2) throw e2; }
   }
   if (tomb.length) { const { error } = await sb.from('bills').update({ deleted_at: new Date().toISOString() }).in('id', tomb); if (error) throw error; await removeCloud(uid, tomb).catch(() => {}); }
-  // receipt photos: upload ones not yet in the cloud; drop cloud copies of bills deleted elsewhere
+  // receipt photos: upload ones not yet in the cloud; drop cloud copies of bills deleted elsewhere.
+  // A missing local file is not a failure (it may live on another device). A storage error is.
   const upKey = `ws-photo-up-${uid}`, up = getSet(upKey);
-  for (const r of out.values()) if (r.photo && !up.has(r.id)) { if (await upload(uid, r.id).catch(() => false)) up.add(r.id); }
+  const photoFailed: string[] = [];
+  for (const r of out.values()) {
+    if (!r.photo || up.has(r.id)) continue;
+    const res = await upload(uid, r.id).catch(() => 'error' as const);
+    if (res === 'ok') up.add(r.id);
+    else if (res === 'error') photoFailed.push(r.id);
+  }
   for (const [id, rm] of remote) if (rm.deleted) { up.delete(id); delLocal(id); }
   putSet(upKey, up);
   putSet(seenKey, new Set(out.keys()));
@@ -75,5 +82,5 @@ export async function syncAll(sb: SupabaseClient, uid: string, local: { history:
   else if (prof?.paynow_mobile) payee = { mobile: prof.paynow_mobile, name: prof.display_name || '' };
 
   const history = [...out.values()].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
-  return { history, friends, payee };
+  return { history, friends, payee, photoFailed };
 }

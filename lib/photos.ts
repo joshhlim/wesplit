@@ -27,10 +27,11 @@ export async function compress(file: Blob, max = 1400, q = 0.72): Promise<Blob> 
 }
 
 const path = (uid: string, id: string) => `${uid}/${id.replace(/[^\w-]/g, '_')}.jpg`;
-export async function upload(uid: string, id: string) {
-  const sb = supa(); const b = await getLocal(id); if (!sb || !b) return false;
+export async function upload(uid: string, id: string): Promise<'ok' | 'missing' | 'error'> {
+  const sb = supa(); if (!sb) return 'error';
+  const b = await getLocal(id); if (!b) return 'missing';
   const { error } = await sb.storage.from('receipts').upload(path(uid, id), b, { upsert: true, contentType: 'image/jpeg' });
-  return !error;
+  return error ? 'error' : 'ok';
 }
 export async function getPhoto(uid: string | null, id: string): Promise<Blob | undefined> {
   const l = await getLocal(id); if (l || !uid) return l;

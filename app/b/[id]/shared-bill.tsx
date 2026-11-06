@@ -1,10 +1,12 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import Link from 'next/link';
-import { CircleCheck, Copy, Check, RefreshCw, MapPin, Tag } from 'lucide-react';
+import { CircleCheck, Copy, Check, RefreshCw, MapPin, Tag, WifiOff } from 'lucide-react';
 import { paynowPayload } from '@/lib/split.mjs';
 import { Mark } from '@/components/brand';
+import { ShareProblem } from '@/components/share-problem';
+import { OfflineBanner, useOnline } from '@/components/offline';
 import { money, type Shared } from '@/lib/shared';
 
 const ini = (n: string) => { const w = n.trim().split(/\s+/); return ((w.length > 1 ? w.map((x) => x[0]).join('') : n).slice(0, 2).toUpperCase()) || '?'; };
@@ -15,21 +17,72 @@ export default function SharedBill({ id, initial }: { id: string; initial: Share
   const [me, setMe] = useState<string | null>(null);
   const [qr, setQr] = useState('');
   const [copied, setCopied] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [connErr, setConnErr] = useState(false);
+  const [gone, setGone] = useState<'missing' | 'revoked' | null>(null);
+  const online = useOnline();
   const host = s.people[0], friends = s.people.slice(1).filter((p) => p.share > 0);
   const p = friends.find((x) => x.id === me);
   const payTo = s.payee.name || fmtSG(s.payee.mobile);
 
   useEffect(() => { try { const k = localStorage.getItem('ws-me-' + id); if (k) setMe(k); } catch {} }, [id]);
   useEffect(() => { if (me) try { localStorage.setItem('ws-me-' + id, me); } catch {} }, [me, id]);
-  const refresh = async () => { const r = await fetch(location.pathname + '/data', { cache: 'no-store' }); if (r.ok) { const d = await r.json(); if (d && !d.revoked) setS(d); else location.reload(); } };
-  useEffect(() => { const t = setInterval(refresh, 20000); const v = () => document.visibilityState === 'visible' && refresh(); document.addEventListener('visibilitychange', v); return () => { clearInterval(t); document.removeEventListener('visibilitychange', v); }; });
-  useEffect(() => { setQr(''); if (p && !p.paid) QRCode.toDataURL(paynowPayload({ mobile: s.payee.mobile, amount: p.share, ref: 'WeSplit ' + p.name }), { margin: 1, width: 260, color: { dark: '#0F1A17' } }).then(setQr); }, [p, s.payee.mobile]);
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const r = await fetch(location.pathname + '/data', { cache: 'no-store' });
+      if (r.status === 404) { setGone('missing'); setConnErr(false); return; }
+      if (!r.ok) { setConnErr(true); return; }
+      const d = await r.json();
+      if (d?.revoked) { setGone('revoked'); setConnErr(false); return; }
+      if (!d?.place) { setConnErr(true); return; }
+      setS(d);
+      setConnErr(false);
+    } catch { setConnErr(true); }
+    finally { setRefreshing(false); }
+  }, []);
+
+  useEffect(() => {
+    if (gone) return;
+    const t = setInterval(() => { void refresh(); }, 20000);
+    const v = () => { if (document.visibilityState === 'visible') void refresh(); };
+    document.addEventListener('visibilitychange', v);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', v); };
+  }, [gone, refresh]);
+
+  useEffect(() => {
+    setQr('');
+    if (!p || p.paid) return;
+    let cancel = false;
+    QRCode.toDataURL(paynowPayload({ mobile: s.payee.mobile, amount: p.share, ref: 'WeSplit ' + p.name }), { margin: 1, width: 260, color: { dark: '#0F1A17' } }).then((url) => { if (!cancel) setQr(url); });
+    return () => { cancel = true; };
+  }, [p, s.payee.mobile]);
+
   const copy = async () => { await navigator.clipboard.writeText(s.payee.mobile.replace('+65', '')); setCopied(true); setTimeout(() => setCopied(false), 1500); };
   const nameOf = (pid: string) => s.people.find((x) => x.id === pid)?.name || '';
 
+  if (gone) return <ShareProblem kind={gone} />;
+
   return (
     <main className="shared">
-      <header className="top"><Link href="/" className="brand"><Mark size={28} /><b>WeSplit</b></Link><button className="icon-btn" aria-label="Refresh" onClick={refresh}><RefreshCw size={18} /></button></header>
+      <header className="top">
+        <Link href="/" className="brand"><Mark size={28} /><b>WeSplit</b></Link>
+        <div className="row gap8">
+          {refreshing && <span className="refresh-tag">Updating</span>}
+          <button className={'icon-btn' + (refreshing ? ' busy' : '')} aria-label={refreshing ? 'Refreshing bill' : 'Refresh'} aria-busy={refreshing} onClick={() => { void refresh(); }}>
+            <RefreshCw size={18} />
+          </button>
+        </div>
+      </header>
+      <OfflineBanner show={!online}>You&apos;re offline. This bill won&apos;t refresh until you&apos;re back.</OfflineBanner>
+      {connErr && (
+        <div className="alert" role="alert">
+          <WifiOff size={18} />
+          <span>Couldn&apos;t connect. The bill on screen may be out of date.</span>
+          <button className="btn compact ghost" onClick={() => { void refresh(); }}>Retry</button>
+        </div>
+      )}
       <div className="hero center">
         <p className="muted">{host?.name || 'Your friend'} split this bill</p>
         <h1>{s.place}</h1>
@@ -54,8 +107,8 @@ export default function SharedBill({ id, initial }: { id: string; initial: Share
           <div className="youowe">
             <span className="muted">{p.name}, you owe {payTo}</span>
             <b className="num huge">{money(p.share)}</b>
-            {qr && <img src={qr} alt={`PayNow QR for ${money(p.share)}`} width={220} height={220} />}
-            <small className="muted">Screenshot and scan in your banking app, or PayNow to</small>
+            {qr ? <img src={qr} alt={`PayNow QR for ${money(p.share)}`} width={220} height={220} /> : <span className="sk qr-skel" aria-busy="true" aria-label="Preparing QR" />}
+            <small className="muted">{qr ? 'Screenshot and scan in your banking app, or PayNow to' : 'Preparing QR…'}</small>
             <button className="chip-btn" onClick={copy}>{copied ? <Check size={16} /> : <Copy size={16} />} {fmtSG(s.payee.mobile)}</button>
           </div>
         ))}
