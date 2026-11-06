@@ -10,8 +10,12 @@ import { History as HistoryIc, CircleCheck, Circle, Bell, UserRound, Mail, LogOu
 import { supa } from '@/lib/supabase';
 import { syncAll } from '@/lib/sync';
 import { createShare, updateShare, revokeShare, shareUrl, snapshotOf, type ShareRef } from '@/lib/share';
+import { syncedLabel } from '@/lib/status.mjs';
 import { Link2, Link2Off } from 'lucide-react';
 import type { User } from '@supabase/supabase-js';
+import { Sheet } from '@/components/sheet';
+import { OfflineBanner, useOnline } from '@/components/offline';
+import { MagicLink, useMagicCooldown, formatCool } from '@/components/magic-link';
 
 type Voucher = { kind: 'pct' | 'amt'; value: number };
 type BD = { gross: number; itemDisc: number; receiptDisc?: number; voucher: number; sub: number; sc: number; gst: number; total: number };
@@ -76,37 +80,61 @@ export default function Home() {
   const back = useRef<'history' | 'friends'>('history');
   const [user, setUser] = useState<User | null>(null);
   const [acct, setAcct] = useState(false);
-  const [sync, setSync] = useState<'idle' | 'busy' | 'ok' | 'off' | 'err'>('idle');
-  const syncing = useRef(false), again = useRef(false), st = useRef(0), latest = useRef({ history, friends, payee });
+  const [sync, setSync] = useState<'idle' | 'pending' | 'busy' | 'ok' | 'off' | 'err'>('idle');
+  const [syncAt, setSyncAt] = useState<number | null>(null);
+  const [photoFail, setPhotoFail] = useState<string[]>([]);
+  const [cloudReady, setCloudReady] = useState(false);
+  const [linkIssue, setLinkIssue] = useState<'expired' | 'invalid' | null>(null);
+  const online = useOnline();
+  const syncing = useRef(false), again = useRef(false), st = useRef(0), echo = useRef(false), booted = useRef(false), toldPhoto = useRef(false);
+  const latest = useRef({ history, friends, payee });
   latest.current = { history, friends, payee };
   const runSync = useCallback(async () => {
     const sb = supa(); if (!sb || !user) return;
-    if (!navigator.onLine) { setSync('off'); return; }
+    if (!navigator.onLine) { setSync('off'); booted.current = true; setCloudReady(true); return; }
     if (syncing.current) { again.current = true; return; }
     syncing.current = true; setSync('busy');
     try {
       const out = await syncAll(sb, user.id, latest.current);
       const same = JSON.stringify(out.history) === JSON.stringify(latest.current.history) && JSON.stringify(out.friends) === JSON.stringify(latest.current.friends);
+      const payeeSame = out.payee.mobile === latest.current.payee.mobile && out.payee.name === latest.current.payee.name;
+      if (!same || !payeeSame) echo.current = true;
       if (!same) { setHistory(out.history as Rec[]); setFriends(out.friends); }
-      if (out.payee.mobile !== latest.current.payee.mobile) setPayee(out.payee);
+      if (!payeeSame) setPayee(out.payee);
       setSync('ok');
+      setSyncAt(Date.now());
+      setPhotoFail((cur) => (out.photoFailed.length || cur.length ? out.photoFailed : cur));
     } catch { setSync(navigator.onLine ? 'err' : 'off'); }
     syncing.current = false;
-    if (again.current) { again.current = false; runSync(); }
+    booted.current = true;
+    setCloudReady(true);
+    if (again.current) { again.current = false; void runSync(); }
   }, [user]);
   useEffect(() => {
     const sb = supa(); if (!sb) return;
     sb.auth.getUser().then(({ data }) => setUser(data.user));
     const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setUser(s?.user ?? null));
     const q = new URLSearchParams(location.search);
-    if (q.has('signedin') || q.has('authError')) {
+    const link = q.get('link');
+    if (link === 'expired' || link === 'invalid') { setLinkIssue(link); window.history.replaceState(null, '', '/'); }
+    else if (q.has('signedin') || q.has('authError')) {
       if (q.get('authError')) setTimeout(() => notify({ msg: q.get('authError')! }), 50); else setTimeout(() => notify({ msg: 'Signed in. Your bills will sync.' }), 50);
       window.history.replaceState(null, '', '/');
     }
     return () => sub.subscription.unsubscribe();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  useEffect(() => { if (!user || !loaded) return; clearTimeout(st.current); st.current = window.setTimeout(runSync, 1200); }, [user, loaded, history, friends, payee, runSync]);
+  useEffect(() => {
+    if (!user || !loaded) return;
+    if (echo.current) { echo.current = false; return; }
+    if (!navigator.onLine) { setSync('off'); booted.current = true; setCloudReady(true); return; }
+    if (syncing.current) { again.current = true; return; }
+    setSync((s) => (s === 'busy' ? s : 'pending'));
+    const delay = booted.current ? 1200 : 0;
+    clearTimeout(st.current);
+    st.current = window.setTimeout(() => { void runSync(); }, delay);
+    return () => clearTimeout(st.current);
+  }, [user, loaded, history, friends, payee, runSync]);
   // Keep public share links in step with the bill (paid status, edits). Retries on the next change if offline.
   const shareT = useRef(0);
   useEffect(() => {
@@ -123,7 +151,8 @@ export default function Home() {
       localStorage.setItem('ws-share-sig', JSON.stringify(sigs));
     }, 800);
   }, [history, loaded]);
-  useEffect(() => { const on = () => runSync(), off = () => setSync('off'); addEventListener('online', on); addEventListener('offline', off); return () => { removeEventListener('online', on); removeEventListener('offline', off); }; }, [runSync]);
+  useEffect(() => { const on = () => { void runSync(); }, off = () => setSync('off'); addEventListener('online', on); addEventListener('offline', off); return () => { removeEventListener('online', on); removeEventListener('offline', off); }; }, [runSync]);
+  useEffect(() => { booted.current = false; setCloudReady(false); }, [user?.id]);
 
   useEffect(() => {
     try {
@@ -158,6 +187,13 @@ export default function Home() {
   const toggleTheme = () => { const t = theme === 'dark' ? 'light' : 'dark'; setTheme(t); document.documentElement.dataset.theme = t; localStorage.setItem('ws-theme', t); };
   const up: Up = useCallback((f) => setBill((b) => f(structuredClone(b))), []);
   const notify = useCallback((t: Toast) => { clearTimeout(tt.current); setToastState(t); if (t) tt.current = window.setTimeout(() => setToastState(null), t.undo ? 4000 : 2500); }, []);
+  const photoKey = photoFail.join(',');
+  useEffect(() => {
+    if (!photoKey) { toldPhoto.current = false; return; }
+    if (toldPhoto.current) return;
+    toldPhoto.current = true;
+    notify({ msg: "A receipt photo didn't upload. We'll retry." });
+  }, [photoKey, notify]);
   const go = (n: number) => { setView(null); setDir(n >= step ? 1 : -1); setStep(n); window.scrollTo({ top: 0 }); };
 
   async function scan(file: File) {
@@ -192,6 +228,15 @@ export default function Home() {
   const result = useMemo(() => split(bill.items, bill.people, bill.assign, bill.mode, bill.total, bill.voucher, bill.receiptOff || 0), [bill]);
   const detected = detectMode(bill.items, bill.total, bill.voucher, bill.receiptOff || 0);
   const can = (i: number) => i === 0 || bill.items.length > 0;
+  const dot = !user ? '' : (!online || sync === 'off') ? 'off' : sync === 'err' ? 'err' : (!cloudReady || sync === 'busy' || sync === 'idle') ? 'busy' : sync === 'pending' ? 'pending' : '';
+  const openBill = (from: 'history' | 'friends', id: string) => { back.current = from; setView(id); };
+
+  if (linkIssue) return (
+    <main>
+      <header className="top"><span className="brand"><Mark size={28} /><b>WeSplit</b></span></header>
+      <MagicLink kind={linkIssue} online={online} onHome={() => setLinkIssue(null)} />
+    </main>
+  );
 
   return (
     <main className={step === 2 ? 'has-bar' : ''}>
@@ -199,22 +244,26 @@ export default function Home() {
         {view ? <button className="icon-btn" aria-label="Back" onClick={() => setView(view === 'history' || view === 'friends' ? null : back.current)}><ChevronLeft size={22} /></button>
           : step > 0 ? <button className="icon-btn" aria-label="Back" onClick={() => go(step - 1)}><ChevronLeft size={22} /></button>
           : <span className="brand"><Mark size={28} />{!toast && <b>WeSplit</b>}</span>}
-        {toast ? (
-          <div className="toast" role="status">
-            <span>{toast.msg}</span>
-            {toast.undo && <button onClick={() => { toast.undo!(); notify(null); }}>Undo</button>}
-          </div>
-        ) : (view || step > 0) && <span className="title">{view === 'friends' ? 'Friends' : view ? (back.current === 'friends' && view !== 'history' ? 'Bill' : 'History') : STEPS[step]}</span>}
+        {!toast && (view || step > 0) && <span className="title">{view === 'friends' ? 'Friends' : view ? (back.current === 'friends' && view !== 'history' ? 'Bill' : 'History') : STEPS[step]}</span>}
+        <div className="live" aria-live="polite" aria-atomic="true">
+          {toast && (
+            <div className="toast">
+              <span>{toast.msg}</span>
+              {toast.undo && <button onClick={() => { toast.undo!(); notify(null); }}>Undo</button>}
+            </div>
+          )}
+        </div>
         <div className="row gap4">
-          {loaded && supa() && <button className={'icon-btn acct' + (user ? ' in' : '')} aria-label={user ? 'Account' : 'Sign in'} onClick={() => setAcct(true)}>{user ? (user.email || '?')[0].toUpperCase() : <UserRound size={18} />}</button>}
+          {loaded && supa() && <button className={'icon-btn acct' + (user ? ' in' : '')} aria-label={user ? 'Account' : 'Sign in'} onClick={() => setAcct(true)}>{user ? (user.email || '?')[0].toUpperCase() : <UserRound size={18} />}{dot && <i className={'sync-dot ' + dot} aria-hidden="true" />}</button>}
           {!view && bill.items.length > 0 && <button className="icon-btn" aria-label="New bill" onClick={newBill}><RotateCcw size={18} /></button>}
           <button className="icon-btn" aria-label={theme === 'dark' ? 'Light mode' : 'Dark mode'} onClick={toggleTheme}>{theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}</button>
         </div>
       </header>
+      <OfflineBanner show={!online}>You&apos;re offline. Entering items still works.</OfflineBanner>
       {view ? <div key={view} className="screen fwd">{view === 'history'
-        ? <HistoryList history={history} open={(id) => { back.current = 'history'; setView(id); }} />
-        : view === 'friends' ? <FriendsView history={history} friends={friends} setHistory={setHistory} notify={notify} payee={payee} open={(id) => { back.current = 'friends'; setView(id); }} />
-        : <BillDetail rec={history.find((r) => r.id === view)} setHistory={setHistory} notify={notify} close={() => setView(back.current)} user={user} />}</div> : <>
+        ? <HistoryList history={history} waiting={!!user && !cloudReady} open={(id) => openBill('history', id)} />
+        : view === 'friends' ? <FriendsView history={history} friends={friends} setHistory={setHistory} notify={notify} payee={payee} open={(id) => openBill('friends', id)} />
+        : <BillDetail rec={history.find((r) => r.id === view)} setHistory={setHistory} notify={notify} close={() => setView(back.current)} user={user} online={online} photoFailed={!!view && photoFail.includes(view)} retry={() => { void runSync(); }} />}</div> : <>
       <nav className="steps" aria-label="Steps">
         {STEPS.map((s, i) => (
           <button key={s} className={'step' + (i === step ? ' on' : '') + (i < step ? ' done' : '')} disabled={!can(i)} aria-current={i === step ? 'step' : undefined} onClick={() => go(i)}>
@@ -224,7 +273,7 @@ export default function Home() {
       </nav>
 
       <div key={step} className={'screen ' + (dir > 0 ? 'fwd' : 'back')}>
-        {step === 0 && <ScanStep busy={busy} err={err} onFile={scan} hasBill={bill.items.length > 0} resume={() => go(2)} openHistory={() => setView('history')} openFriends={() => setView('friends')} owed={history.reduce((s, r) => s + r.people.slice(1).filter((p) => !p.paid).reduce((a, p) => a + Math.round(p.share * 100), 0), 0) / 100}
+        {step === 0 && <ScanStep busy={busy} err={err} online={online} booting={!!user && !cloudReady && history.length === 0} onFile={scan} hasBill={bill.items.length > 0} resume={() => go(2)} openHistory={() => setView('history')} openFriends={() => setView('friends')} owed={history.reduce((s, r) => s + r.people.slice(1).filter((p) => !p.paid).reduce((a, p) => a + Math.round(p.share * 100), 0), 0) / 100}
           onManual={() => { up((b) => ({ ...b, receiptOff: 0, discLabels: [], voucher: undefined, merchant: null, total: null, assign: {}, items: [{ id: uid(), name: 'Item 1', qty: 1, price: 0 }] })); go(1); }} />}
         {step === 1 && <PeopleStep bill={bill} up={up} notify={notify} next={() => go(2)} friends={friends} setFriends={setFriends} />}
         {step === 2 && <AssignStep bill={bill} up={up} notify={notify} next={() => go(3)} detected={detected} total={result.total} shares={result.shares} bd={result.breakdown} />}
@@ -232,38 +281,82 @@ export default function Home() {
       </div></>}
 
       <footer className="foot">
-        <span><Lock size={12} /> {user ? 'Synced privately to your account.' : 'Your data stays on your phone.'}</span>
+        <FooterSync user={user} sync={sync} online={online} cloudReady={cloudReady} syncAt={syncAt} retry={() => { void runSync(); }} />
         <a href="/privacy">Privacy</a>
         <a href={REPO} target="_blank" rel="noopener">Source on GitHub</a>
       </footer>
-      {acct && <AccountSheet user={user} sync={sync} close={() => setAcct(false)} notify={notify} />}
+      {acct && <AccountSheet user={user} sync={sync} online={online} cloudReady={cloudReady} syncAt={syncAt} photoFail={photoFail.length} close={() => setAcct(false)} notify={notify} retry={() => { void runSync(); }} />}
     </main>
   );
 }
 
-function AccountSheet({ user, sync, close, notify }: { user: User | null; sync: string; close: () => void; notify: (t: Toast) => void }) {
+function syncText(o: { sync: string; online: boolean; cloudReady: boolean; syncAt: number | null; now: number; where: 'foot' | 'sheet' }) {
+  if (!o.online || o.sync === 'off') return o.where === 'sheet' ? 'Offline. Changes stay on this phone.' : "You're offline. Changes stay on this phone.";
+  if (o.sync === 'err') return "Couldn't sync";
+  if (!o.cloudReady || o.sync === 'busy' || o.sync === 'idle') return 'Syncing…';
+  if (o.sync === 'pending') return 'Pending changes';
+  if (o.syncAt && o.where === 'foot' && o.now - o.syncAt >= 45_000) return 'Synced privately to your account.';
+  if (o.syncAt) return syncedLabel(o.syncAt, o.now);
+  return o.where === 'foot' ? 'Synced privately to your account.' : 'Synced just now';
+}
+
+function useNow(active: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setNow(Date.now()), 15000);
+    return () => window.clearInterval(id);
+  }, [active]);
+  return now;
+}
+
+function FooterSync({ user, sync, online, cloudReady, syncAt, retry }: { user: User | null; sync: string; online: boolean; cloudReady: boolean; syncAt: number | null; retry: () => void }) {
+  const now = useNow(!!user);
+  if (!user) return <span><Lock size={12} /> Your data stays on your phone.</span>;
+  const text = syncText({ sync, online, cloudReady, syncAt, now, where: 'foot' });
+  const Icon = (!online || sync === 'off') ? WifiOff : sync === 'err' ? CloudOff : text.startsWith('Synced privately') ? Lock : Cloud;
+  return (
+    <span>
+      <Icon size={12} /> {text}
+      {sync === 'err' && online && <button className="retry-link" onClick={retry}>Retry</button>}
+      {sync === 'err' && !online && <span className="retry-link">Connect to retry.</span>}
+    </span>
+  );
+}
+
+function AccountSheet({ user, sync, online, cloudReady, syncAt, photoFail, close, notify, retry }: { user: User | null; sync: string; online: boolean; cloudReady: boolean; syncAt: number | null; photoFail: number; close: () => void; notify: (t: Toast) => void; retry: () => void }) {
   const [email, setEmail] = useState('');
   const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [confirm, setConfirm] = useState(0);
+  const { left, start } = useMagicCooldown();
+  const now = useNow(!!user);
   useEffect(() => { if (confirm > 1) { const t = setTimeout(() => setConfirm((c) => c - 1), 1000); return () => clearTimeout(t); } }, [confirm]);
   const sb = supa()!;
   const cb = location.origin + '/auth/callback';
   const google = async () => {
-    setErr(''); const { error } = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: cb } });
+    setErr('');
+    if (!online) { setErr('Connect to the internet to sign in.'); return; }
+    const { error } = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: cb } });
     if (error) setErr(/not enabled|provider/i.test(error.message) ? 'Google sign-in isn\'t switched on yet. Use the email link for now.' : error.message);
   };
   const magic = async (e: React.FormEvent) => {
     e.preventDefault(); setErr('');
+    if (!online) { setErr('Connect to the internet to send a link.'); return; }
+    if (left > 0) return;
     if (!/^\S+@\S+\.\S+$/.test(email)) { setErr('Enter a valid email address.'); return; }
     setBusy(true);
     const { error } = await sb.auth.signInWithOtp({ email: email.trim(), options: { emailRedirectTo: cb } });
     setBusy(false);
-    if (error) setErr(/rate/i.test(error.message) ? 'Too many emails sent. Try again in a little while.' : error.message); else setSent(true);
+    if (error) {
+      if (/rate/i.test(error.message)) start();
+      setErr(/rate/i.test(error.message) ? 'Too many emails sent. Try again in a little while.' : error.message);
+    } else { start(); setSent(true); }
   };
   const out = async () => { await sb.auth.signOut(); close(); notify({ msg: 'Signed out. Bills stay on this phone.' }); };
   const del = () => {
+    if (!online) return;
     close();
     let undone = false;
     notify({ msg: 'Deleting your account…', undo: () => { undone = true; } });
@@ -276,46 +369,65 @@ function AccountSheet({ user, sync, close, notify }: { user: User | null; sync: 
       notify({ msg: 'Account and synced data deleted.' });
     }, 4200);
   };
-  const status = sync === 'busy' ? 'Syncing…' : sync === 'off' ? 'Offline. Will sync when you\'re back.' : sync === 'err' ? 'Sync paused. Retrying soon.' : 'All bills synced';
+  const status = syncText({ sync, online, cloudReady, syncAt, now, where: 'sheet' });
+  const down = !online || sync === 'off' || sync === 'err';
   return (
-    <div className="backdrop" onClick={close}>
-      <div className="sheet" role="dialog" aria-modal="true" aria-label={user ? 'Account' : 'Sign in'} onClick={(e) => e.stopPropagation()}>
+    <Sheet label={user ? 'Account' : 'Sign in'} onClose={close}>
         <span className="grabber" />
         <button className="icon-btn sheet-x" aria-label="Close" onClick={close}><X size={18} /></button>
         {!user ? sent ? <div className="sheet-body center">
             <span className="sheet-ic"><Mail size={26} /></span>
             <h2>Check your email</h2>
-            <p className="muted">We sent a sign-in link to <b>{email}</b>. Open it on this phone.</p>
+            <p className="muted">We sent a sign-in link to <b>{email}</b>.</p>
+            <p className="note">Open the link on this phone. A link opened on another device won&apos;t sign this one in.</p>
+            {left > 0 && <p className="fine">You can resend in {formatCool(left)}.</p>}
             <button className="btn ghost" onClick={() => setSent(false)}>Use a different email</button>
           </div> : <div className="sheet-body">
             <h2>Keep your bills everywhere</h2>
             <p className="muted">Sign in to sync bills, paid status and friends across your devices. Optional. WeSplit works fine without it.</p>
-            <button className="btn google" onClick={google}><GoogleG /> Continue with Google</button>
+            <button className="btn google" disabled={!online} onClick={google}><GoogleG /> Continue with Google</button>
             <div className="or"><span>or</span></div>
             <form onSubmit={magic} className="col gap8" noValidate>
               <input className="pill-input" type="email" inputMode="email" autoComplete="email" placeholder="you@email.com" value={email} onChange={(e) => setEmail(e.target.value)} aria-label="Email" />
-              <button className="btn primary" disabled={busy}><Mail size={18} /> {busy ? 'Sending…' : 'Email me a link'}</button>
+              <button className="btn primary" disabled={busy || !online || left > 0}><Mail size={18} /> {busy ? 'Sending…' : left > 0 ? `Resend in ${formatCool(left)}` : 'Email me a link'}</button>
             </form>
+            {!online && <p className="off-why">Connect to the internet to sign in.</p>}
             {err && <p className="err" role="alert"><CircleAlert size={14} /> {err}</p>}
             <p className="fine">Bills already on this phone are added to your account. <a href="/privacy">Privacy</a></p>
           </div>
           : <div className="sheet-body">
-            <div className="who"><span className="acct in big">{(user.email || '?')[0].toUpperCase()}</span><div><b>{user.email}</b><span className="muted">{sync === 'off' || sync === 'err' ? <CloudOff size={13} /> : <Cloud size={13} />} {status}</span></div></div>
+            <div className="who"><span className="acct in big">{(user.email || '?')[0].toUpperCase()}</span><div><b>{user.email}</b><span className="muted" role="status">{down ? <CloudOff size={13} /> : <Cloud size={13} />} {status}</span></div></div>
+            {(sync === 'err' || photoFail > 0) && <button className="btn ghost" disabled={!online} onClick={retry}><RotateCcw size={18} /> Retry</button>}
+            {sync === 'err' && !online && <p className="off-why">Connect to the internet to retry.</p>}
+            {photoFail > 0 && <p className="err" role="alert"><CircleAlert size={14} /> A receipt photo didn&apos;t upload. It stays on this phone until the next sync.</p>}
             <button className="btn ghost" onClick={out}><LogOut size={18} /> Sign out</button>
-            {!confirm ? <button className="btn danger-link" onClick={() => setConfirm(4)}><Trash2 size={16} /> Delete account and data</button>
+            {!confirm ? <button className="btn danger-link" disabled={!online} onClick={() => setConfirm(4)}><Trash2 size={16} /> Delete account and data</button>
               : <div className="confirm">
                 <p><b>Delete your account?</b> This removes your synced bills, friends and PayNow details from our servers. Bills on this phone stay.</p>
-                <div className="row gap8"><button className="btn ghost" onClick={() => setConfirm(0)}>Keep account</button><button className="btn del" disabled={confirm > 1} onClick={del}>{confirm > 1 ? `Delete (${confirm - 1})` : 'Delete'}</button></div>
+                <div className="row gap8"><button className="btn ghost" onClick={() => setConfirm(0)}>Keep account</button><button className="btn del" disabled={confirm > 1 || !online} onClick={del}>{confirm > 1 ? `Delete (${confirm - 1})` : 'Delete'}</button></div>
               </div>}
+            {!online && <p className="off-why">Connect to the internet to delete your account. Bills on this phone stay either way.</p>}
             <p className="fine"><a href="/privacy">What we store</a></p>
           </div>}
-      </div>
-    </div>
+    </Sheet>
   );
 }
 const GoogleG = () => <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>;
 
 /* ---------- shared bits ---------- */
+function Flash({ value, children }: { value: string; children: React.ReactNode }) {
+  const [on, setOn] = useState(false);
+  const prev = useRef<string | null>(null);
+  useEffect(() => {
+    if (prev.current === null) { prev.current = value; return; }
+    if (prev.current === value) return;
+    prev.current = value;
+    setOn(true);
+    const t = window.setTimeout(() => setOn(false), 800);
+    return () => window.clearTimeout(t);
+  }, [value]);
+  return <span className={on ? 'flash' : undefined}>{children}</span>;
+}
 function Avatar({ p, size = 40 }: { p: Person; size?: number }) {
   return <span className="av" style={{ background: p.color, width: size, height: size, fontSize: Math.round(size * 0.36) }}>{ini(p.name) === "You" ? "You" : ini(p.name)}</span>;
 }
@@ -330,7 +442,17 @@ function Stepper({ value, set, min = 0, max = 20, label }: { value: number; set:
 }
 
 /* ---------- 1. Scan ---------- */
-function ScanStep({ busy, err, onFile, onManual, hasBill, resume, openHistory, owed, openFriends }: { busy: boolean; err: string; onFile: (f: File) => void; onManual: () => void; hasBill: boolean; resume: () => void; openHistory: () => void; owed: number; openFriends: () => void }) {
+function CloudSkeleton() {
+  return (
+    <div className="cloud-skel" aria-busy="true" aria-label="Loading your bills">
+      <p className="fine">Loading your bills…</p>
+      <div className="sk hrow-sk" />
+      <div className="sk hrow-sk" />
+      <div className="sk hrow-sk" />
+    </div>
+  );
+}
+function ScanStep({ busy, err, online, booting, onFile, onManual, hasBill, resume, openHistory, owed, openFriends }: { busy: boolean; err: string; online: boolean; booting: boolean; onFile: (f: File) => void; onManual: () => void; hasBill: boolean; resume: () => void; openHistory: () => void; owed: number; openFriends: () => void }) {
   const ref = useRef<HTMLInputElement>(null);
   if (busy) return (
     <section className="stack">
@@ -351,16 +473,18 @@ function ScanStep({ busy, err, onFile, onManual, hasBill, resume, openHistory, o
         <p className="muted">Snap the receipt. We&apos;ll list the items for you.</p>
       </div>
       <input ref={ref} type="file" accept="image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }} />
-      <button className="scan-tile" onClick={() => ref.current?.click()}>
+      <button className="scan-tile" disabled={!online} aria-describedby={!online ? 'scan-off' : undefined} onClick={() => ref.current?.click()}>
         <span className="scan-ic"><Camera size={28} /></span>
         <b>Scan receipt</b>
         <span className="muted">Take a photo or choose one</span>
       </button>
+      {!online && <p id="scan-off" className="off-why center">Connect to the internet to scan a receipt.</p>}
       {err && <div className="alert" role="alert">{/offline/i.test(err) ? <WifiOff size={18} /> : <CircleAlert size={18} />}<span>{err}</span></div>}
       <button className="btn ghost" onClick={onManual}><PenLine size={18} /> Enter items yourself</button>
       {hasBill && <button className="btn ghost" onClick={resume}>Continue current bill <ArrowRight size={18} /></button>}
       <button className="btn ghost" onClick={openHistory}><HistoryIc size={18} /> History{owed > 0 && <span className="pill-num num">{money(owed)} owed</span>}</button>
       <button className="btn ghost" onClick={openFriends}><HandCoins size={18} /> Friends &amp; balances</button>
+      {booting && <CloudSkeleton />}
     </section>
   );
 }
@@ -500,7 +624,7 @@ function AssignStep({ bill, up, notify, next, detected, total, shares, bd }: { b
         </div>
         {bd.sc > 0 && <div className="line muted"><span>Service charge 10%</span><span className="num">{money(bd.sc / 100)}</span></div>}
         {bd.gst > 0 && <div className="line muted"><span>GST 9%</span><span className="num">{money(bd.gst / 100)}</span></div>}
-        <div className="line total"><span>Total</span><b className="num">{money(total)}</b></div>
+        <div className="line total"><span>Total</span><b className="num"><Flash value={money(total)}>{money(total)}</Flash></b></div>
         {bill.total != null && Math.abs(bill.total - total) > 0.01 && <p className="note warn">The receipt says {money(bill.total)}. Check the items or charges.</p>}
         {shares._ > 0 && <p className="note warn"><span className="num">{money(shares._)}</span> still needs an owner.</p>}
       </div>
@@ -510,14 +634,13 @@ function AssignStep({ bill, up, notify, next, detected, total, shares, bd }: { b
         {bill.people.map((p) => (
           <button key={p.id} className={'tot' + (focus === p.id ? ' on' : '')} style={{ ['--pc' as string]: p.color }} aria-pressed={focus === p.id}
             onClick={() => { buzz(6); setFocus((f) => (f === p.id ? null : p.id)); }}>
-            <Avatar p={p} size={32} /><span><small>{p.name}</small><b className="num">{money(shares[p.id] || 0)}</b></span>
+            <Avatar p={p} size={32} /><span><small>{p.name}</small><b className="num"><Flash value={money(shares[p.id] || 0)}>{money(shares[p.id] || 0)}</Flash></b></span>
           </button>
         ))}
       </div>
 
       {sheetItem && (
-        <div className="backdrop" onClick={() => setSheet(null)}>
-          <div className="sheet" role="dialog" aria-label={`Edit ${sheetItem.name}`} onClick={(e) => e.stopPropagation()}>
+        <Sheet label={`Edit ${sheetItem.name}`} onClose={() => setSheet(null)}>
             <span className="grabber" aria-hidden="true" />
             <div className="fields">
               <label className="field grow"><span>Item</span><input value={sheetItem.name} onChange={(e) => up((b) => { b.items.find((x) => x.id === sheetItem.id)!.name = e.target.value; return b; })} /></label>
@@ -542,8 +665,7 @@ function AssignStep({ bill, up, notify, next, detected, total, shares, bd }: { b
               <button className="btn text danger" onClick={() => del(sheetItem.id)}><Trash2 size={18} /> Delete</button>
               <button className="btn primary compact" onClick={() => setSheet(null)}>Done</button>
             </div>
-          </div>
-        </div>
+        </Sheet>
       )}
     </section>
   );
@@ -607,7 +729,7 @@ function SettleStep({ bill, notify, shares, total, payee, setPayee, saveRec, bd 
       {allSet && <Celebrate colors={bill.people.map((p) => p.color)} />}
       <div className="hero center">
         <p className="muted">You&apos;re owed</p>
-        <h1 className="num huge">{money(owed)}</h1>
+        <h1 className="num huge"><Flash value={money(owed)}>{money(owed)}</Flash></h1>
         <p className="muted small">{bill.merchant || 'Your bill'} · {money(total)} total · {MODES[bill.mode as Mode].label}</p>
       </div>
       <button className="paychip" onClick={() => setEditing(true)} aria-label="Change PayNow number"><QrCode size={16} /> Paying to <b className="num">{maskSG(payee.mobile)}</b><PenLine size={14} /></button>
@@ -690,32 +812,28 @@ async function makeCard(list: Entry[], o: { mobile: string; payTo: string; place
 function canShareFiles(f: File) { try { return !!navigator.canShare?.({ files: [f] }); } catch { return false; } }
 
 function ShareRow({ make, text, file, sig, notify, label = 'Share', alwaysOpen = false }: { make: () => Promise<Blob>; text: string; file: string; sig: string; notify: (t: Toast) => void; label?: string; alwaysOpen?: boolean }) {
-  // Prefetch the PNG so the tap can call navigator.share without awaiting work first.
-  // iOS Safari drops the user-gesture if we await QR/canvas generation between the tap and share().
+  // Prefetch the PNG so the tap can call navigator.share with nothing awaited before it.
+  // iOS Safari drops the user-gesture if share() is not called synchronously in the tap.
   const [fileReady, setFileReady] = useState<File | null>(null);
+  const [failed, setFailed] = useState(false);
   const [open, setOpen] = useState(alwaysOpen);
-  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState(false);
   const gen = useRef(0);
+  const preparing = !fileReady && !failed;
   useEffect(() => {
-    const n = ++gen.current; setFileReady(null);
-    make().then((b) => { if (gen.current === n) setFileReady(new File([b], file, { type: 'image/png' })); }).catch(() => {});
+    const n = ++gen.current;
+    setFileReady(null); setFailed(false); setNote(false);
+    make().then((b) => { if (gen.current === n) setFileReady(new File([b], file, { type: 'image/png' })); }).catch(() => { if (gen.current === n) { setFailed(true); notify({ msg: "Couldn't build the share image." }); } });
   }, [sig]); // eslint-disable-line react-hooks/exhaustive-deps
-  async function share() {
-    const tryNative = async (f: File | null) => {
-      if (typeof navigator.share !== 'function') return false;
-      try {
-        if (f && canShareFiles(f)) { await navigator.share({ files: [f], text }); return true; }
-        await navigator.share({ text }); return true;
-      } catch (e) { if ((e as Error).name === 'AbortError') return true; return false; }
-    };
-    if (fileReady) { if (await tryNative(fileReady)) return; setOpen(true); return; }
-    setBusy(true);
+  function share() {
+    const ready = fileReady;
+    const fallback = () => { setOpen(true); setNote(true); };
+    if (typeof navigator.share !== 'function') { fallback(); return; }
+    let pending: Promise<void>;
     try {
-      const built = new File([await make()], file, { type: 'image/png' });
-      setFileReady(built);
-      if (await tryNative(built)) { setBusy(false); return; }
-    } catch { notify({ msg: "Couldn't build the share image. Try WhatsApp or Save image." }); }
-    setBusy(false); setOpen(true);
+      pending = ready && canShareFiles(ready) ? navigator.share({ files: [ready], text }) : navigator.share({ text });
+    } catch { fallback(); return; }
+    void pending.catch((e) => { if ((e as Error).name === 'AbortError') return; fallback(); });
   }
   async function download() {
     try {
@@ -730,12 +848,13 @@ function ShareRow({ make, text, file, sig, notify, label = 'Share', alwaysOpen =
   }
   return (
     <div className="share">
-      <button className="chip-btn" disabled={busy} onClick={share} aria-label={label}><Share2 size={16} /> {busy ? 'Preparing…' : label}</button>
-      {open && <>
+      <button className="chip-btn" disabled={preparing} aria-busy={preparing} onClick={share} aria-label={label}><Share2 size={16} /> {preparing ? 'Preparing QR…' : label}</button>
+      {note && <p className="share-note" role="status">The share sheet didn&apos;t open. Use WhatsApp, Telegram, or copy.</p>}
+      {(open || alwaysOpen) && <>
         <a className="chip-btn" href={waLink(text)} target="_blank" rel="noopener" aria-label="Send on WhatsApp"><MessageCircle size={16} /> WhatsApp</a>
         <a className="chip-btn" href={tgLink(text)} target="_blank" rel="noopener" aria-label="Send on Telegram"><Send size={16} /> Telegram</a>
         <button className="chip-btn" onClick={copy} aria-label="Copy message"><Copy size={16} /> Copy</button>
-        <button className="chip-btn" onClick={download} aria-label="Save image" disabled={!fileReady && busy}><Download size={16} /> Save image</button>
+        <button className="chip-btn" onClick={download} aria-label="Save image" disabled={!fileReady}><Download size={16} /> Save image</button>
       </>}
     </div>
   );
@@ -746,14 +865,17 @@ function PayQR({ mobile, amount, who, payTo, place, notify }: { mobile: string; 
   const [show, setShow] = useState(false);
   useEffect(() => {
     if (!show) return;
-    QRCode.toDataURL(paynowPayload({ mobile, amount, ref: 'WeSplit ' + who }), { margin: 1, width: 240, color: { dark: '#0F1A17' } }).then(setSrc);
+    let cancel = false;
+    setSrc('');
+    QRCode.toDataURL(paynowPayload({ mobile, amount, ref: 'WeSplit ' + who }), { margin: 1, width: 240, color: { dark: '#0F1A17' } }).then((url) => { if (!cancel) setSrc(url); });
+    return () => { cancel = true; };
   }, [show, mobile, amount, who]);
   return (
     <>
       {show && (
         <button className="qr" onClick={() => setShow(false)} aria-label="Hide QR">
-          {src && <img src={src} alt={`PayNow QR for ${money(amount)}`} />}
-          <small className="muted">Scan with any Singapore banking app</small>
+          {src ? <img src={src} alt={`PayNow QR for ${money(amount)}`} /> : <span className="sk qr-skel" aria-busy="true" aria-label="Preparing QR" />}
+          <small className="muted">{src ? 'Scan with any Singapore banking app' : 'Preparing QR…'}</small>
         </button>
       )}
       <div className="share">
@@ -768,8 +890,9 @@ function PayQR({ mobile, amount, who, payTo, place, notify }: { mobile: string; 
 const owedOf = (r: Rec) => r.people.slice(1).filter((p) => !p.paid && p.share > 0).reduce((a, p) => a + Math.round(p.share * 100), 0) / 100;
 const fmtDate = (d: string) => new Date(d).toLocaleDateString('en-SG', { day: 'numeric', month: 'short', year: 'numeric' });
 
-function HistoryList({ history, open }: { history: Rec[]; open: (id: string) => void }) {
+function HistoryList({ history, open, waiting = false }: { history: Rec[]; open: (id: string) => void; waiting?: boolean }) {
   const owed = history.reduce((s, r) => s + Math.round(owedOf(r) * 100), 0) / 100;
+  if (waiting && !history.length) return <section className="stack"><CloudSkeleton /></section>;
   if (!history.length) return (
     <section className="stack">
       <div className="empty"><HistoryIc size={32} /><b>No bills yet</b><span className="muted">Bills you settle will show up here.</span></div>
@@ -777,7 +900,8 @@ function HistoryList({ history, open }: { history: Rec[]; open: (id: string) => 
   );
   return (
     <section className="stack">
-      <div className="hero center"><p className="muted">Owed to you</p><h1 className="num huge">{money(owed)}</h1><p className="muted small">across {history.length} bill{history.length > 1 ? 's' : ''}</p></div>
+      {waiting && <p className="fine center" role="status">Syncing…</p>}
+      <div className="hero center"><p className="muted">Owed to you</p><h1 className="num huge"><Flash value={money(owed)}>{money(owed)}</Flash></h1><p className="muted small">across {history.length} bill{history.length > 1 ? 's' : ''}</p></div>
       <ul className="hlist">
         {history.map((r) => {
           const others = r.people.slice(1).filter((p) => p.share > 0);
@@ -797,7 +921,7 @@ function HistoryList({ history, open }: { history: Rec[]; open: (id: string) => 
   );
 }
 
-function BillDetail({ rec, setHistory, notify, close, user }: { rec?: Rec; setHistory: (f: (h: Rec[]) => Rec[]) => void; notify: (t: Toast) => void; close: () => void; user: User | null }) {
+function BillDetail({ rec, setHistory, notify, close, user, online, photoFailed, retry }: { rec?: Rec; setHistory: (f: (h: Rec[]) => Rec[]) => void; notify: (t: Toast) => void; close: () => void; user: User | null; online: boolean; photoFailed: boolean; retry: () => void }) {
   const allPaidNow = !!rec && rec.people.slice(1).filter((p) => p.share > 0).every((p) => p.paid) && rec.people.slice(1).some((p) => p.share > 0);
   const prevAll = useRef(allPaidNow);
   const [party, setParty] = useState(0);
@@ -833,23 +957,24 @@ function BillDetail({ rec, setHistory, notify, close, user }: { rec?: Rec; setHi
     <section className="stack">
       {party > 0 && <Confetti key={party} colors={rec.people.map((p) => p.color)} />}
       <div className="hero center">
-        <PlaceTag rec={rec} save={(place, location) => patch((r) => ({ ...r, place, location, edited: true }))} />
-        <h1 className="num huge">{money(owedOf(rec))}</h1>
+        <PlaceTag rec={rec} online={online} save={(place, location) => patch((r) => ({ ...r, place, location, edited: true }))} />
+        <h1 className="num huge"><Flash value={money(owedOf(rec))}>{money(owedOf(rec))}</Flash></h1>
         <p className="muted small">{fmtDate(rec.date)} · {paid === others.length ? 'Everyone has paid' : `${paid} of ${others.length} paid`} · {money(rec.total)} total</p>
         {bd && (bd.itemDisc + (bd.receiptDisc || 0) + bd.voucher > 0) && <p className="ok small"><Tag size={13} /> Saved {money((bd.itemDisc + (bd.receiptDisc || 0) + bd.voucher) / 100)} with discounts{rec.voucher ? ` (${rec.voucher})` : ''}</p>}
       </div>
       <ul className="settle">
         {others.map((p) => (
           <li key={p.id} className={'owe' + (p.paid ? ' is-paid' : '')} style={{ ['--pc' as string]: p.color }}>
-            <div className="line"><span className="row gap12"><Avatar p={p} size={44} /><b>{p.name}</b></span><b className="num big">{money(p.share)}</b></div>
+            <div className="line"><span className="row gap12"><Avatar p={p} size={44} /><b>{p.name}</b></span><b className="num big"><Flash value={money(p.share)}>{money(p.share)}</Flash></b></div>
             <div className="share">
               <button className={'chip-btn paid-btn' + (p.paid ? ' on' : '')} aria-pressed={p.paid} onClick={() => toggle(p.id)}>{p.paid ? <CircleCheck size={16} /> : <Circle size={16} />} {p.paid ? 'Paid' : 'Mark as paid'}</button>
-              {!p.paid && <NudgeRow rec={rec} who={p.name} amount={p.share} payTo={payTo} ensure={ensureLink} notify={notify} />}
+              {!p.paid && <NudgeRow rec={rec} who={p.name} amount={p.share} payTo={payTo} ensure={ensureLink} notify={notify} online={online} />}
             </div>
           </li>
         ))}
       </ul>
-      <ShareLink rec={rec} ensure={ensureLink} notify={notify} revoke={async () => {
+      {photoFailed && <p className="note warn" role="alert">This receipt photo didn&apos;t upload. It stays on this phone.{online && <> <button className="retry-link" onClick={retry}>Retry</button></>}</p>}
+      <ShareLink rec={rec} ensure={ensureLink} notify={notify} online={online} revoke={async () => {
         try { await revokeShare(rec.share!); setHistory((h) => h.map((r) => (r.id === rec.id ? { ...r, share: undefined, updatedAt: Date.now() } : r))); notify({ msg: 'Link turned off' }); }
         catch { notify({ msg: "Couldn't turn off the link. Check your connection." }); }
       }} />
@@ -868,18 +993,16 @@ function PhotoView({ id, uid, close, replace }: { id: string; uid: string | null
   const [missing, setMissing] = useState(false);
   useEffect(() => { let u = ''; getPhoto(uid, id).then((b) => { if (b) { u = URL.createObjectURL(b); setSrc(u); } else setMissing(true); }).catch(() => setMissing(true)); return () => { if (u) URL.revokeObjectURL(u); }; }, [id, uid]);
   return (
-    <div className="backdrop" onClick={close}>
-      <div className="sheet photo-sheet" role="dialog" aria-label="Receipt photo" onClick={(e) => e.stopPropagation()}>
-        <span className="grabber" aria-hidden="true" />
-        <button className="icon-btn sheet-x" aria-label="Close" onClick={close}><X size={18} /></button>
-        {src ? <img src={src} alt="Receipt photo" className="receipt-img" /> : <div className="empty"><ImageIc size={28} /><b>{missing ? 'Photo not on this device' : 'Loading…'}</b>{missing && <span className="muted">Sign in on the phone that took it to sync it.</span>}</div>}
-        <button className="btn ghost" onClick={replace}><Camera size={18} /> Replace photo</button>
-      </div>
-    </div>
+    <Sheet label="Receipt photo" onClose={close} className="photo-sheet">
+      <span className="grabber" aria-hidden="true" />
+      <button className="icon-btn sheet-x" aria-label="Close" onClick={close}><X size={18} /></button>
+      {src ? <img src={src} alt="Receipt photo" className="receipt-img" /> : missing ? <div className="empty"><ImageIc size={28} /><b>Photo not on this device</b><span className="muted">Sign in on the phone that took it to sync it.</span></div> : <div className="sk photo-skel" aria-busy="true" aria-label="Loading receipt photo" />}
+      <button className="btn ghost" onClick={replace}><Camera size={18} /> Replace photo</button>
+    </Sheet>
   );
 }
 
-function PlaceTag({ rec, save }: { rec: Rec; save: (place: string, location?: string) => void }) {
+function PlaceTag({ rec, save, online }: { rec: Rec; save: (place: string, location?: string) => void; online: boolean }) {
   const [edit, setEdit] = useState(false);
   const [name, setName] = useState(rec.place);
   const [loc, setLoc] = useState(rec.location || '');
@@ -907,7 +1030,8 @@ function PlaceTag({ rec, save }: { rec: Rec; save: (place: string, location?: st
     <div className="placeedit">
       <label className="pill-field sm"><Receipt size={16} /><input aria-label="Restaurant" placeholder="Restaurant" maxLength={60} value={name} onChange={(e) => setName(e.target.value)} /></label>
       <label className="pill-field sm"><MapPin size={16} /><input aria-label="Location" placeholder="Location (optional)" maxLength={60} value={loc} onChange={(e) => setLoc(e.target.value)} /></label>
-      <div className="share"><button className="chip-btn" onClick={locate}><MapPin size={16} /> Use my location</button></div>
+      <div className="share"><button className="chip-btn" disabled={!online} onClick={locate}><MapPin size={16} /> Use my location</button></div>
+      {!online && <p className="off-why">Connect to look up a place. You can still type it.</p>}
       {busy && <p className="small muted">{busy}</p>}
       <div className="row gap8"><button className="btn ghost compact" onClick={() => { setEdit(false); setName(rec.place); setLoc(rec.location || ''); }}>Cancel</button><button className="btn primary compact" onClick={() => { save(name.trim() || 'Bill', loc.trim() || undefined); setEdit(false); }}>Save</button></div>
     </div>
@@ -990,7 +1114,7 @@ function FriendsView({ history, friends, setHistory, notify, payee, open }: { hi
   return (
     <section className="stack">
       {party > 0 && <Confetti key={party} colors={COLORS} />}
-      <div className="hero center"><p className="muted">Friends owe you</p><h1 className="num huge">{money(total)}</h1><p className="muted small">{list.length ? `${list.length} friend${list.length > 1 ? 's' : ''} with unpaid bills` : 'Everyone is square'}</p></div>
+      <div className="hero center"><p className="muted">Friends owe you</p><h1 className="num huge"><Flash value={money(total)}>{money(total)}</Flash></h1><p className="muted small">{list.length ? `${list.length} friend${list.length > 1 ? 's' : ''} with unpaid bills` : 'Everyone is square'}</p></div>
       {!list.length && <div className="empty"><HandCoins size={32} /><b>All square</b><span className="muted">When friends owe you from a saved bill, they show up here.</span></div>}
       <ul className="fbal">
         {list.map((x) => (
@@ -1021,22 +1145,33 @@ function FriendsView({ history, friends, setHistory, notify, payee, open }: { hi
 
 function TextShare({ text, url, label = 'Share', notify }: { text: string; url: string; label?: string; notify?: (t: Toast) => void }) {
   const full = text + (url ? ' ' + url : '');
+  const [note, setNote] = useState(false);
   const native = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
   return (
     <div className="share">
+      {note && <p className="share-note" role="status">The share sheet didn&apos;t open. Use WhatsApp, Telegram, or copy.</p>}
       <a className="chip-btn" href={'https://wa.me/?text=' + encodeURIComponent(full)} target="_blank" rel="noopener" aria-label="Send on WhatsApp"><MessageCircle size={16} /> WhatsApp</a>
       <a className="chip-btn" href={'https://t.me/share/url?url=' + encodeURIComponent(url || APP_URL) + '&text=' + encodeURIComponent(text)} target="_blank" rel="noopener" aria-label="Send on Telegram"><Send size={16} /> Telegram</a>
-      {native && <button className="chip-btn" onClick={() => { navigator.share({ text, url: url || undefined }).catch((e) => { if ((e as Error).name !== 'AbortError') notify?.({ msg: "Couldn't open Share. Try WhatsApp." }); }); }}><Share2 size={16} /> {label}</button>}
+      {native && <button className="chip-btn" onClick={() => {
+        // Call share synchronously in the tap. iOS drops the gesture if this is awaited first.
+        let pending: Promise<void>;
+        try { pending = navigator.share({ text, url: url || undefined }); }
+        catch { setNote(true); return; }
+        void pending.catch((e) => { if ((e as Error).name === 'AbortError') return; setNote(true); });
+      }}><Share2 size={16} /> {label}</button>}
       <button className="chip-btn" onClick={async () => { try { await navigator.clipboard.writeText(full); notify?.({ msg: 'Message copied' }); } catch { notify?.({ msg: "Couldn't copy." }); } }}><Copy size={16} /> Copy</button>
     </div>
   );
 }
 
-function ShareLink({ rec, ensure, revoke, notify }: { rec: Rec; ensure: () => Promise<string | null>; revoke: () => void; notify: (t: Toast) => void }) {
+function ShareLink({ rec, ensure, revoke, notify, online }: { rec: Rec; ensure: () => Promise<string | null>; revoke: () => void; notify: (t: Toast) => void; online: boolean }) {
   const [busy, setBusy] = useState(false);
   const [sure, setSure] = useState(false);
   if (!rec.share) return (
-    <button className="btn ghost" disabled={busy} onClick={async () => { setBusy(true); await ensure(); setBusy(false); }}><Link2 size={18} /> {busy ? 'Making link…' : 'Share bill link'}</button>
+    <>
+      <button className="btn ghost" disabled={busy || !online} onClick={async () => { setBusy(true); await ensure(); setBusy(false); }}><Link2 size={18} /> {busy ? 'Making link…' : 'Share bill link'}</button>
+      {!online && <p className="off-why">Connect to the internet to make a link. The bill stays on this phone.</p>}
+    </>
   );
   const url = shareUrl(rec.share.id);
   const host = rec.payee.name ? `${rec.payee.name} here! ` : '';
@@ -1048,18 +1183,23 @@ function ShareLink({ rec, ensure, revoke, notify }: { rec: Rec; ensure: () => Pr
       <TextShare text={`${host}Here's the split for ${rec.place} (${money(rec.total)}). Tap your name to see what you owe:`} url={url} notify={notify} />
       <div className="share">
         <button className="chip-btn" onClick={async () => { await navigator.clipboard.writeText(url).catch(() => {}); notify({ msg: 'Link copied' }); }}><Copy size={16} /> Copy link</button>
-        {!sure ? <button className="chip-btn danger" onClick={() => setSure(true)}><Link2Off size={16} /> Stop sharing</button>
-          : <button className="chip-btn danger" onClick={() => { setSure(false); revoke(); }}><Link2Off size={16} /> Tap again to turn off</button>}
+        {!sure ? <button className="chip-btn danger" disabled={!online} onClick={() => setSure(true)}><Link2Off size={16} /> Stop sharing</button>
+          : <button className="chip-btn danger" disabled={!online} onClick={() => { setSure(false); revoke(); }}><Link2Off size={16} /> Tap again to turn off</button>}
       </div>
+      {!online && <p className="off-why">Connect to the internet to turn off this link.</p>}
     </div>
   );
 }
 
-function NudgeRow({ rec, who, amount, payTo, ensure, notify }: { rec: Rec; who: string; amount: number; payTo: string; ensure: () => Promise<string | null>; notify: (t: Toast) => void }) {
+function NudgeRow({ rec, who, amount, payTo, ensure, notify, online }: { rec: Rec; who: string; amount: number; payTo: string; ensure: () => Promise<string | null>; notify: (t: Toast) => void; online: boolean }) {
   const [url, setUrl] = useState<string | null>(rec.share ? shareUrl(rec.share.id) : null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  if (!open) return <button className="chip-btn" disabled={busy} onClick={async () => { setBusy(true); const u = await ensure(); setBusy(false); if (u) { setUrl(u); setOpen(true); } }}><Bell size={16} /> {busy ? 'Nudge…' : 'Nudge'}</button>;
+  const needsNet = !online && !rec.share;
+  if (!open) return <>
+    <button className="chip-btn" disabled={busy || needsNet} onClick={async () => { setBusy(true); const u = await ensure(); setBusy(false); if (u) { setUrl(u); setOpen(true); } }}><Bell size={16} /> {busy ? 'Nudge…' : 'Nudge'}</button>
+    {needsNet && <span className="off-why">Connect to the internet to nudge with a link.</span>}
+  </>;
   const saved = rec.breakdown && rec.breakdown.itemDisc + (rec.breakdown.receiptDisc || 0) + rec.breakdown.voucher > 0 ? ' (after discounts)' : '';
   const text = `Hey ${who}! Gentle nudge for ${rec.place} 🙏 Your share is ${money(amount)}${saved}. PayNow ${payTo === fmtSG(rec.payee.mobile) ? fmtSG(rec.payee.mobile) : `${payTo} (${fmtSG(rec.payee.mobile)})`} or tap your name here for the QR:`;
   return <TextShare text={text} url={url!} label="More" notify={notify} />;

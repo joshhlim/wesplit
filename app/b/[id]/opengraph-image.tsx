@@ -7,16 +7,16 @@ export const alt = 'A WeSplit bill';
 export default async function OG({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const s = await getShared(id);
-  const ok = s && !s.revoked;
-  const people = ok ? s.people.slice(1).filter((p) => p.share > 0).slice(0, 4) : [];
+  const bill = s.status === 'ok' ? s.data : null;
+  const people = bill ? bill.people.slice(1).filter((p) => p.share > 0).slice(0, 4) : [];
   return new ImageResponse(
     <div style={{ width: '100%', height: '100%', display: 'flex', background: '#F6F8F7', padding: 72, fontFamily: 'sans-serif' }}>
       <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', flex: 1 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}><Mark size={64} /><div style={{ fontSize: 40, fontWeight: 700, color: INK }}>WeSplit</div></div>
         <div style={{ display: 'flex', flexDirection: 'column' }}>
-          <div style={{ fontSize: 30, color: '#4B5753' }}>{ok ? `${s.people[0]?.name || 'A friend'} split the bill` : 'Bill link'}</div>
-          <div style={{ fontSize: 68, fontWeight: 700, color: INK, lineHeight: 1.1, letterSpacing: -1.5, maxWidth: 600 }}>{ok ? s.place.slice(0, 40) : 'Not available'}</div>
-          {ok && <div style={{ fontSize: 56, fontWeight: 700, color: BRAND, marginTop: 8 }}>{money(s.total)}</div>}
+          <div style={{ fontSize: 30, color: '#4B5753' }}>{bill ? `${bill.people[0]?.name || 'A friend'} split the bill` : 'Bill link'}</div>
+          <div style={{ fontSize: 68, fontWeight: 700, color: INK, lineHeight: 1.1, letterSpacing: -1.5, maxWidth: 600 }}>{bill ? bill.place.slice(0, 40) : 'Not available'}</div>
+          {bill && <div style={{ fontSize: 56, fontWeight: 700, color: BRAND, marginTop: 8 }}>{money(bill.total)}</div>}
           <div style={{ fontSize: 28, color: '#4B5753', marginTop: 20 }}>Tap your name to see what you owe.</div>
         </div>
       </div>

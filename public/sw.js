@@ -1,5 +1,5 @@
 // WeSplit service worker: precache the app shell so the installed app opens offline.
-const CACHE = 'wesplit-v7';
+const CACHE = 'wesplit-v8';
 const SHELL = ['/', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/apple-icon'];
 
 self.addEventListener('install', (e) => {
